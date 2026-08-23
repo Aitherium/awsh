@@ -117,12 +117,37 @@ jobs:
 
       - name: Publish awsh
         if: ${{ github.event_name == 'release' || inputs.dry_run != 'true' }}
-        # --provenance is the reason this job lives on the mirror. No
-        # NODE_AUTH_TOKEN: the npm CLI picks up this job's OIDC id-token, and a
-        # token here would actually DISABLE trusted publishing.
+        env:
+          # BOOTSTRAP ONLY, and it removes itself. npm refuses to attach a
+          # trusted publisher to a package that does not yet EXIST, so the first
+          # ever publish of a new name cannot use OIDC: measured on run
+          # 32643613538, where every step passed and the upload died
+          # `E404 PUT https://registry.npmjs.org/awsh`.
+          #
+          # Setting this DISABLES trusted publishing and therefore provenance,
+          # which is the whole reason this job lives on the public mirror -- so
+          # it is a branch, not a replacement. awdk's equivalent lane hardcodes
+          # its token with a comment asking someone to delete the line later;
+          # that keeps working and quietly forfeits provenance for as long as
+          # anyone forgets. Here, DELETING THE SECRET restores provenance with
+          # no code change and nothing to remember.
+          #
+          # After the first successful publish: register the trusted publisher
+          # on npmjs.com (package -> Settings -> Trusted Publisher ->
+          # Aitherium/awsh, workflow npm-publish.yml), then delete the NPM_TOKEN
+          # secret from this repo. The next run goes back to OIDC on its own.
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
+          set -e
           npm install -g npm@latest >/dev/null 2>&1 || true
-          npm publish --provenance --access public
+          if [ -n "$NODE_AUTH_TOKEN" ]; then
+            echo "::warning::NPM_TOKEN present - publishing with TOKEN auth, so"\
+                 "this release carries NO provenance. Delete the secret once the"\
+                 "trusted publisher is registered."
+            npm publish --access public
+          else
+            npm publish --provenance --access public
+          fi
 
       - name: Publish the alias packages
         if: ${{ github.event_name == 'release' || inputs.dry_run != 'true' }}

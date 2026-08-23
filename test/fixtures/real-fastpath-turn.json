@@ -1,0 +1,1016 @@
+[
+  {
+    "type": "received",
+    "data": {
+      "type": "received",
+      "agent": "aither",
+      "session_id": "a972c900-5c12-495b-87b9-791aba2dba8f",
+      "preamble_ms": 4
+    }
+  },
+  {
+    "type": "session_start",
+    "data": {
+      "type": "session_start",
+      "agent": "aither",
+      "model": "auto",
+      "session_id": "a972c900-5c12-495b-87b9-791aba2dba8f"
+    }
+  },
+  {
+    "type": "answer_segment",
+    "data": {
+      "segment_index": 0,
+      "kind": "initial",
+      "agent": "aither",
+      "reason": "fast first pass",
+      "type": "answer_segment"
+    }
+  },
+  {
+    "type": "token",
+    "data": {
+      "t": "Let me check my memory…",
+      "n": 1,
+      "agent": "aither",
+      "segment_index": 0,
+      "type": "token"
+    }
+  },
+  {
+    "type": "segment_end",
+    "data": {
+      "segment_index": 0,
+      "agent": "aither",
+      "type": "segment_end"
+    }
+  },
+  {
+    "type": "progress",
+    "data": {
+      "stage": "classify",
+      "message": "Classifying intent...",
+      "phase": "classify_start",
+      "elapsed_ms": 260,
+      "agent": "aither",
+      "type": "progress"
+    }
+  },
+  {
+    "type": "heartbeat",
+    "data": {
+      "ts": 1783278592.4762256,
+      "elapsed_ms": 5425,
+      "type": "heartbeat"
+    }
+  },
+  {
+    "type": "heartbeat",
+    "data": {
+      "ts": 1783278594.3483906,
+      "elapsed_ms": 7297,
+      "type": "heartbeat"
+    }
+  },
+  {
+    "type": "heartbeat",
+    "data": {
+      "ts": 1783278595.8813097,
+      "elapsed_ms": 8830,
+      "type": "heartbeat"
+    }
+  },
+  {
+    "type": "classify",
+    "data": {
+      "type": "classify",
+      "stage": "classify",
+      "intent": {
+        "type": "search",
+        "complexity": "simple",
+        "needs_tools": true
+      },
+      "effort": {
+        "level": 6,
+        "original_level": 7,
+        "capped_by": "user_max_effort",
+        "tier": "standard",
+        "followup_boost": 0,
+        "oneshot": false
+      },
+      "promotion_suggested": null,
+      "elapsed_ms": 8720,
+      "agent": "aither"
+    }
+  },
+  {
+    "type": "classifier_timing",
+    "data": {
+      "type": "classifier_timing",
+      "stage": "classifier_timing",
+      "classifier": {
+        "source": "neuron_live",
+        "total_ms": 6923,
+        "queue_time_ms": 3,
+        "execution_time_ms": 4045,
+        "prompt_tokens": 0,
+        "total_tokens": 0,
+        "trace_id": "",
+        "request_id": "req_1783278589863_2383",
+        "llm_calls": 1,
+        "cache_hit": false,
+        "shared_inflight": false,
+        "intent_type": "conversation",
+        "effort_level": 6,
+        "confidence": 0.7
+      },
+      "elapsed_ms": 8720,
+      "agent": "aither"
+    }
+  },
+  {
+    "type": "heartbeat",
+    "data": {
+      "ts": 1783278597.4547503,
+      "elapsed_ms": 10404,
+      "type": "heartbeat"
+    }
+  },
+  {
+    "type": "reasoning_engage",
+    "data": {
+      "type": "reasoning_engage",
+      "stage": "reasoning_engage",
+      "depth": "skip",
+      "auto_engaged": true,
+      "source": "deep_reasoning_helper",
+      "elapsed_ms": 10918,
+      "agent": "aither"
+    }
+  },
+  {
+    "type": "reasoning_depth",
+    "data": {
+      "type": "reasoning_depth",
+      "stage": "reasoning_depth",
+      "depth": "light",
+      "source": "execution_plan",
+      "effort": 6,
+      "elapsed_ms": 11333,
+      "agent": "aither"
+    }
+  },
+  {
+    "type": "model_select",
+    "data": {
+      "type": "model_select",
+      "stage": "model_select",
+      "model_selection": {
+        "recommended_model": "qwen36-27b-dgx",
+        "tier": "standard",
+        "context_depth": "full"
+      },
+      "reasoning": {
+        "used": true,
+        "depth": "light",
+        "trace_id": null,
+        "enable_deep_think": true
+      },
+      "fast_mode": false,
+      "elapsed_ms": 11409,
+      "agent": "aither"
+    }
+  },
+  {
+    "type": "pipeline",
+    "data": {
+      "type": "pipeline",
+      "stage": "summary",
+      "effort": {
+        "level": 6,
+        "tier": "standard"
+      },
+      "strategy": "standard",
+      "model_selection": {
+        "recommended_model": "qwen36-27b-dgx",
+        "tier": "standard"
+      },
+      "reasoning": {
+        "used": true,
+        "depth": "light"
+      },
+      "fast_mode": false,
+      "elapsed_ms": 11409,
+      "agent": "aither"
+    }
+  },
+  {
+    "type": "heartbeat",
+    "data": {
+      "ts": 1783278602.349529,
+      "elapsed_ms": 15299,
+      "type": "heartbeat"
+    }
+  },
+  {
+    "type": "reasoning_backend_health",
+    "data": {
+      "type": "reasoning_backend_health",
+      "stage": "reasoning_backend_health",
+      "backends": {
+        "vllm": true,
+        "vllm_swap": true,
+        "vllm_orchestrator": true,
+        "vllm_reasoning": true,
+        "vllm_fastcontext": true,
+        "vllm_dgx": true,
+        "vllm_dgx_embed": true,
+        "vllm_dgx_perception": true,
+        "comfyui": true
+      },
+      "reasoning_tier": "standard",
+      "elapsed_ms": 11610,
+      "agent": "aither"
+    }
+  },
+  {
+    "type": "plan_ready",
+    "data": {
+      "type": "plan_ready",
+      "stage": "plan_ready",
+      "summary": "model: qwen36-27b-dgx | reasoning: light | deep thinking enabled | creation: quality | SASE context engaged",
+      "effort": 6,
+      "intent": "search",
+      "tier": "standard",
+      "model": "qwen36-27b-dgx",
+      "reasoning_depth": "light",
+      "agentic": false,
+      "orchestration_mode": "single_agent",
+      "method": "mcts",
+      "step_count": 0,
+      "steps": [],
+      "elapsed_ms": 11611,
+      "agent": "aither"
+    }
+  },
+  {
+    "type": "tool_selection",
+    "data": {
+      "type": "tool_selection",
+      "stage": "tool_selection",
+      "detected_categories": [
+        "search",
+        "memory"
+      ],
+      "tool_names": [
+        "web_search",
+        "knowledge_search"
+      ],
+      "intent_type": "search",
+      "effort_level": 6,
+      "intent_required_tools": [
+        "web_search",
+        "knowledge_search"
+      ],
+      "tool_nanogpt": {
+        "available": true,
+        "is_trained": false,
+        "total_records": 0,
+        "predictions_made": 0
+      },
+      "routing_judge": {
+        "available": true,
+        "enabled": true,
+        "total_corrections": 0,
+        "correction_rate": 0,
+        "avg_latency_ms": 0
+      },
+      "intent_tool_map": {
+        "available": true,
+        "tools": [
+          "web_search",
+          "query_memory",
+          "explore_code"
+        ],
+        "agent": "aither",
+        "confidence": 0.1,
+        "source": "fallback"
+      },
+      "elapsed_ms": 12129,
+      "agent": "aither"
+    }
+  },
+  {
+    "type": "tool_call",
+    "data": {
+      "type": "tool_call",
+      "stage": "tool_call",
+      "name": "web_search",
+      "tool": "web_search",
+      "args": {
+        "query": "Explain in detail how the MicroScheduler routes LLM calls, and search memory for any prior issues."
+      },
+      "elapsed_ms": 15149,
+      "agent": "aither"
+    }
+  },
+  {
+    "type": "heartbeat",
+    "data": {
+      "ts": 1783278603.858022,
+      "elapsed_ms": 16807,
+      "type": "heartbeat"
+    }
+  },
+  {
+    "type": "tool_result",
+    "data": {
+      "type": "tool_result",
+      "stage": "tool_result",
+      "name": "web_search",
+      "tool": "web_search",
+      "result_count": 5,
+      "ok": true,
+      "elapsed_ms": 16864,
+      "agent": "aither"
+    }
+  },
+  {
+    "type": "heartbeat",
+    "data": {
+      "ts": 1783278605.5757632,
+      "elapsed_ms": 18527,
+      "type": "heartbeat"
+    }
+  },
+  {
+    "type": "heartbeat",
+    "data": {
+      "ts": 1783278607.0754275,
+      "elapsed_ms": 20027,
+      "type": "heartbeat"
+    }
+  },
+  {
+    "type": "heartbeat",
+    "data": {
+      "ts": 1783278645.9831085,
+      "elapsed_ms": 58937,
+      "type": "heartbeat"
+    }
+  },
+  {
+    "type": "fast_path",
+    "data": {
+      "type": "fast_path",
+      "stage": "fast_path",
+      "source": "search_fastpath",
+      "result_count": 5,
+      "elapsed_ms": 20065,
+      "agent": "aither"
+    }
+  },
+  {
+    "type": "session_context",
+    "data": {
+      "type": "session_context",
+      "stage": "session_context",
+      "history_chars": 0,
+      "message_count": 0,
+      "session_state": {
+        "session_id": "42914ac6-2127-4cb4-9af7-4801310fa0b3",
+        "active_intent": "search",
+        "active_tools": [],
+        "intent_turns_remaining": 3
+      },
+      "source": "client_fallback",
+      "elapsed_ms": 20686,
+      "agent": "aither"
+    }
+  },
+  {
+    "type": "session_learn",
+    "data": {
+      "type": "session_learn",
+      "stage": "session_learn",
+      "is_failure": false,
+      "adaptations_applied": 0,
+      "elapsed_ms": 20718,
+      "agent": "aither"
+    }
+  },
+  {
+    "type": "suggested_followups",
+    "data": {
+      "type": "suggested_followups",
+      "stage": "suggested_followups",
+      "followups": [
+        "Go deeper on this?",
+        "Pull the key points?",
+        "Find related sources?"
+      ],
+      "agent": "aither"
+    }
+  },
+  {
+    "type": "answer_segment",
+    "data": {
+      "segment_index": 1,
+      "kind": "continuation",
+      "agent": "aither",
+      "reason": "tool results",
+      "type": "answer_segment"
+    }
+  },
+  {
+    "type": "token",
+    "data": {
+      "t": "The prov",
+      "n": 1,
+      "agent": "aither",
+      "segment_index": 1,
+      "type": "token"
+    }
+  },
+  {
+    "type": "token",
+    "data": {
+      "t": "ided sea",
+      "n": 2,
+      "agent": "aither",
+      "segment_index": 1,
+      "type": "token"
+    }
+  },
+  {
+    "type": "token",
+    "data": {
+      "t": "rch resu",
+      "n": 3,
+      "agent": "aither",
+      "segment_index": 1,
+      "type": "token"
+    }
+  },
+  {
+    "type": "token",
+    "data": {
+      "t": "lts do n",
+      "n": 4,
+      "agent": "aither",
+      "segment_index": 1,
+      "type": "token"
+    }
+  },
+  {
+    "type": "token",
+    "data": {
+      "t": "ot conta",
+      "n": 5,
+      "agent": "aither",
+      "segment_index": 1,
+      "type": "token"
+    }
+  },
+  {
+    "type": "token",
+    "data": {
+      "t": "in speci",
+      "n": 6,
+      "agent": "aither",
+      "segment_index": 1,
+      "type": "token"
+    }
+  },
+  {
+    "type": "token",
+    "data": {
+      "t": "fic info",
+      "n": 7,
+      "agent": "aither",
+      "segment_index": 1,
+      "type": "token"
+    }
+  },
+  {
+    "type": "token",
+    "data": {
+      "t": "rmation ",
+      "n": 8,
+      "agent": "aither",
+      "segment_index": 1,
+      "type": "token"
+    }
+  },
+  {
+    "type": "token",
+    "data": {
+      "t": "about ho",
+      "n": 9,
+      "agent": "aither",
+      "segment_index": 1,
+      "type": "token"
+    }
+  },
+  {
+    "type": "token",
+    "data": {
+      "t": "w the Mi",
+      "n": 10,
+      "agent": "aither",
+      "segment_index": 1,
+      "type": "token"
+    }
+  },
+  {
+    "type": "token",
+    "data": {
+      "t": "croSched",
+      "n": 11,
+      "agent": "aither",
+      "segment_index": 1,
+      "type": "token"
+    }
+  },
+  {
+    "type": "token",
+    "data": {
+      "t": "uler rou",
+      "n": 12,
+      "agent": "aither",
+      "segment_index": 1,
+      "type": "token"
+    }
+  },
+  {
+    "type": "token",
+    "data": {
+      "t": "tes LLM ",
+      "n": 13,
+      "agent": "aither",
+      "segment_index": 1,
+      "type": "token"
+    }
+  },
+  {
+    "type": "token",
+    "data": {
+      "t": "(Large L",
+      "n": 14,
+      "agent": "aither",
+      "segment_index": 1,
+      "type": "token"
+    }
+  },
+  {
+    "type": "token",
+    "data": {
+      "t": "anguage ",
+      "n": 15,
+      "agent": "aither",
+      "segment_index": 1,
+      "type": "token"
+    }
+  },
+  {
+    "type": "token",
+    "data": {
+      "t": "Model) c",
+      "n": 16,
+      "agent": "aither",
+      "segment_index": 1,
+      "type": "token"
+    }
+  },
+  {
+    "type": "token",
+    "data": {
+      "t": "alls or ",
+      "n": 17,
+      "agent": "aither",
+      "segment_index": 1,
+      "type": "token"
+    }
+  },
+  {
+    "type": "token",
+    "data": {
+      "t": "any prio",
+      "n": 18,
+      "agent": "aither",
+      "segment_index": 1,
+      "type": "token"
+    }
+  },
+  {
+    "type": "token",
+    "data": {
+      "t": "r issues",
+      "n": 19,
+      "agent": "aither",
+      "segment_index": 1,
+      "type": "token"
+    }
+  },
+  {
+    "type": "token",
+    "data": {
+      "t": " related",
+      "n": 20,
+      "agent": "aither",
+      "segment_index": 1,
+      "type": "token"
+    }
+  },
+  {
+    "type": "token",
+    "data": {
+      "t": " to memo",
+      "n": 21,
+      "agent": "aither",
+      "segment_index": 1,
+      "type": "token"
+    }
+  },
+  {
+    "type": "token",
+    "data": {
+      "t": "ry searc",
+      "n": 22,
+      "agent": "aither",
+      "segment_index": 1,
+      "type": "token"
+    }
+  },
+  {
+    "type": "token",
+    "data": {
+      "t": "hing. Th",
+      "n": 23,
+      "agent": "aither",
+      "segment_index": 1,
+      "type": "token"
+    }
+  },
+  {
+    "type": "token",
+    "data": {
+      "t": "e result",
+      "n": 24,
+      "agent": "aither",
+      "segment_index": 1,
+      "type": "token"
+    }
+  },
+  {
+    "type": "token",
+    "data": {
+      "t": "s mentio",
+      "n": 25,
+      "agent": "aither",
+      "segment_index": 1,
+      "type": "token"
+    }
+  },
+  {
+    "type": "token",
+    "data": {
+      "t": "n variou",
+      "n": 26,
+      "agent": "aither",
+      "segment_index": 1,
+      "type": "token"
+    }
+  },
+  {
+    "type": "token",
+    "data": {
+      "t": "s topics",
+      "n": 27,
+      "agent": "aither",
+      "segment_index": 1,
+      "type": "token"
+    }
+  },
+  {
+    "type": "token",
+    "data": {
+      "t": ", includ",
+      "n": 28,
+      "agent": "aither",
+      "segment_index": 1,
+      "type": "token"
+    }
+  },
+  {
+    "type": "token",
+    "data": {
+      "t": "ing a me",
+      "n": 29,
+      "agent": "aither",
+      "segment_index": 1,
+      "type": "token"
+    }
+  },
+  {
+    "type": "token",
+    "data": {
+      "t": "mory lay",
+      "n": 30,
+      "agent": "aither",
+      "segment_index": 1,
+      "type": "token"
+    }
+  },
+  {
+    "type": "token",
+    "data": {
+      "t": "er for A",
+      "n": 31,
+      "agent": "aither",
+      "segment_index": 1,
+      "type": "token"
+    }
+  },
+  {
+    "type": "token",
+    "data": {
+      "t": "I agents",
+      "n": 32,
+      "agent": "aither",
+      "segment_index": 1,
+      "type": "token"
+    }
+  },
+  {
+    "type": "token",
+    "data": {
+      "t": ", runnin",
+      "n": 33,
+      "agent": "aither",
+      "segment_index": 1,
+      "type": "token"
+    }
+  },
+  {
+    "type": "token",
+    "data": {
+      "t": "g LLMs l",
+      "n": 34,
+      "agent": "aither",
+      "segment_index": 1,
+      "type": "token"
+    }
+  },
+  {
+    "type": "token",
+    "data": {
+      "t": "ocally, ",
+      "n": 35,
+      "agent": "aither",
+      "segment_index": 1,
+      "type": "token"
+    }
+  },
+  {
+    "type": "token",
+    "data": {
+      "t": "and othe",
+      "n": 36,
+      "agent": "aither",
+      "segment_index": 1,
+      "type": "token"
+    }
+  },
+  {
+    "type": "token",
+    "data": {
+      "t": "r unrela",
+      "n": 37,
+      "agent": "aither",
+      "segment_index": 1,
+      "type": "token"
+    }
+  },
+  {
+    "type": "token",
+    "data": {
+      "t": "ted serv",
+      "n": 38,
+      "agent": "aither",
+      "segment_index": 1,
+      "type": "token"
+    }
+  },
+  {
+    "type": "token",
+    "data": {
+      "t": "ices. Ho",
+      "n": 39,
+      "agent": "aither",
+      "segment_index": 1,
+      "type": "token"
+    }
+  },
+  {
+    "type": "token",
+    "data": {
+      "t": "wever, n",
+      "n": 40,
+      "agent": "aither",
+      "segment_index": 1,
+      "type": "token"
+    }
+  },
+  {
+    "type": "token",
+    "data": {
+      "t": "one of t",
+      "n": 41,
+      "agent": "aither",
+      "segment_index": 1,
+      "type": "token"
+    }
+  },
+  {
+    "type": "token",
+    "data": {
+      "t": "he sourc",
+      "n": 42,
+      "agent": "aither",
+      "segment_index": 1,
+      "type": "token"
+    }
+  },
+  {
+    "type": "token",
+    "data": {
+      "t": "es provi",
+      "n": 43,
+      "agent": "aither",
+      "segment_index": 1,
+      "type": "token"
+    }
+  },
+  {
+    "type": "token",
+    "data": {
+      "t": "de detai",
+      "n": 44,
+      "agent": "aither",
+      "segment_index": 1,
+      "type": "token"
+    }
+  },
+  {
+    "type": "token",
+    "data": {
+      "t": "led expl",
+      "n": 45,
+      "agent": "aither",
+      "segment_index": 1,
+      "type": "token"
+    }
+  },
+  {
+    "type": "token",
+    "data": {
+      "t": "anations",
+      "n": 46,
+      "agent": "aither",
+      "segment_index": 1,
+      "type": "token"
+    }
+  },
+  {
+    "type": "token",
+    "data": {
+      "t": " about t",
+      "n": 47,
+      "agent": "aither",
+      "segment_index": 1,
+      "type": "token"
+    }
+  },
+  {
+    "type": "token",
+    "data": {
+      "t": "he Micro",
+      "n": 48,
+      "agent": "aither",
+      "segment_index": 1,
+      "type": "token"
+    }
+  },
+  {
+    "type": "token",
+    "data": {
+      "t": "Schedule",
+      "n": 49,
+      "agent": "aither",
+      "segment_index": 1,
+      "type": "token"
+    }
+  },
+  {
+    "type": "token",
+    "data": {
+      "t": "r's rout",
+      "n": 50,
+      "agent": "aither",
+      "segment_index": 1,
+      "type": "token"
+    }
+  },
+  {
+    "type": "token",
+    "data": {
+      "t": "ing mech",
+      "n": 51,
+      "agent": "aither",
+      "segment_index": 1,
+      "type": "token"
+    }
+  },
+  {
+    "type": "token",
+    "data": {
+      "t": "anisms o",
+      "n": 52,
+      "agent": "aither",
+      "segment_index": 1,
+      "type": "token"
+    }
+  },
+  {
+    "type": "token",
+    "data": {
+      "t": "r memory",
+      "n": 53,
+      "agent": "aither",
+      "segment_index": 1,
+      "type": "token"
+    }
+  },
+  {
+    "type": "token",
+    "data": {
+      "t": "-related",
+      "n": 54,
+      "agent": "aither",
+      "segment_index": 1,
+      "type": "token"
+    }
+  },
+  {
+    "type": "token",
+    "data": {
+      "t": " issues.",
+      "n": 55,
+      "agent": "aither",
+      "segment_index": 1,
+      "type": "token"
+    }
+  },
+  {
+    "type": "segment_end",
+    "data": {
+      "segment_index": 1,
+      "agent": "aither",
+      "type": "segment_end"
+    }
+  },
+  {
+    "type": "answer",
+    "data": {
+      "answer": "The provided search results do not contain specific information about how the MicroScheduler routes LLM (Large Language Model) calls or any prior issues related to memory searching. The results mention various topics, including a memory layer for AI agents, running LLMs locally, and other unrelated services. However, none of the sources provide detailed explanations about the MicroScheduler's routing mechanisms or memory-related issues.",
+      "agent": "aither",
+      "eager": true,
+      "type": "answer"
+    }
+  },
+  {
+    "type": "suggested_followups",
+    "data": {
+      "type": "suggested_followups",
+      "stage": "suggested_followups",
+      "followups": [
+        "Want me to go deeper?",
+        "Anything you'd change?"
+      ]
+    }
+  },
+  {
+    "type": "complete",
+    "data": {
+      "duration_ms": 59716,
+      "model": "unknown",
+      "agent": "aither",
+      "content": "The provided search results do not contain specific information about how the MicroScheduler routes LLM (Large Language Model) calls or any prior issues related to memory searching. The results mention various topics, including a memory layer for AI agents, running LLMs locally, and other unrelated services. However, none of the sources provide detailed explanations about the MicroScheduler's routing mechanisms or memory-related issues.",
+      "confidence": 1,
+      "eager": true,
+      "segments": 2,
+      "type": "complete"
+    }
+  }
+]

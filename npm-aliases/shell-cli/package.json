@@ -1,0 +1,10 @@
+{
+  "name": "@aitherium/shell-cli",
+  "version": "1.18.0",
+  "description": "Renamed to awsh. This package installs awsh for you.",
+  "license": "BUSL-1.1",
+  "homepage": "https://aitherium.github.io/awsh/",
+  "dependencies": {
+    "awsh": "1.18.0"
+  }
+}

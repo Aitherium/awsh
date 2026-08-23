@@ -1,0 +1,125 @@
+[
+  {
+    "type": "session_start",
+    "data": {
+      "session_id": "test-session",
+      "agent": "aither",
+      "model": "qwen36-27b"
+    }
+  },
+  {
+    "type": "context_start",
+    "data": {
+      "sources": ["knowledge-base", "recent-messages"]
+    }
+  },
+  {
+    "type": "context_stage",
+    "data": {
+      "stage": "gathering knowledge-base",
+      "detail": "searching for relevant documents"
+    }
+  },
+  {
+    "type": "context_done",
+    "data": {
+      "context_tokens": 2450,
+      "gather_time_ms": 1200,
+      "document_count": 5
+    }
+  },
+  {
+    "type": "llm_start",
+    "data": {
+      "model": "qwen36-27b",
+      "prompt_tokens_est": 3100,
+      "has_tools": true
+    }
+  },
+  {
+    "type": "tool_selection",
+    "data": {
+      "tool_names": ["github_list_issues", "github_search"],
+      "strategy": "parallel"
+    }
+  },
+  {
+    "type": "tool_call",
+    "data": {
+      "tools": [
+        {
+          "name": "github_list_issues",
+          "function": {
+            "name": "github_list_issues"
+          },
+          "args": {
+            "owner": "aitherium",
+            "repo": "aitheros",
+            "state": "open",
+            "labels": "bug"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "type": "tool_result",
+    "data": {
+      "results": [
+        {
+          "tool": "github_list_issues",
+          "success": true,
+          "output": "{\"results\": [{\"title\": \"Auth token expiration bug\", \"url\": \"https://github.com/aitherium/aitheros/issues/142\"}, {\"title\": \"Memory leak in KV cache\", \"url\": \"https://github.com/aitherium/aitheros/issues/139\"}]}",
+          "duration_ms": 450
+        }
+      ]
+    }
+  },
+  {
+    "type": "llm_done",
+    "data": {
+      "model_used": "qwen36-27b",
+      "tokens_used": 580,
+      "llm_time_ms": 2340,
+      "has_tool_calls": true,
+      "has_thinking": false
+    }
+  },
+  {
+    "type": "token",
+    "data": {
+      "token": "The",
+      "t": "The"
+    }
+  },
+  {
+    "type": "token",
+    "data": {
+      "token": " latest",
+      "t": " latest"
+    }
+  },
+  {
+    "type": "answer",
+    "data": {
+      "answer": "The latest issues found are about auth token expiration and memory leaks in the KV cache. Both are marked as bugs and need immediate attention."
+    }
+  },
+  {
+    "type": "complete",
+    "data": {
+      "content": "The latest issues found are about auth token expiration and memory leaks in the KV cache. Both are marked as bugs and need immediate attention.",
+      "duration_ms": 3590,
+      "model": "qwen36-27b"
+    }
+  },
+  {
+    "type": "suggested_followups",
+    "data": {
+      "followups": [
+        "Show me the details of the auth token bug",
+        "How do I fix the memory leak issue?"
+      ]
+    }
+  }
+]

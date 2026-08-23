@@ -1,0 +1,450 @@
+{
+  "commands": [
+    {
+      "name": "help",
+      "category": "shell",
+      "description": "Show available commands",
+      "aliases": []
+    },
+    {
+      "name": "connect",
+      "category": "shell",
+      "description": "Open a remote terminal into a prod/dev environment via tunnel.aitherium.com (Ctrl-Q to detach)",
+      "aliases": [
+        "ssh"
+      ]
+    },
+    {
+      "name": "view",
+      "category": "shell",
+      "description": "View a file (markdown/code/text rendered; PNG images inline)",
+      "aliases": [
+        "open",
+        "cat"
+      ]
+    },
+    {
+      "name": "edit",
+      "category": "shell",
+      "description": "Edit a file in the in-shell editor (save ^S, quit ^Q)",
+      "aliases": [
+        "e",
+        "nano"
+      ]
+    },
+    {
+      "name": "status",
+      "category": "system",
+      "description": "Show system status",
+      "aliases": [
+        "st"
+      ]
+    },
+    {
+      "name": "agents",
+      "category": "system",
+      "description": "List registered agents",
+      "aliases": []
+    },
+    {
+      "name": "services",
+      "category": "system",
+      "description": "List running services with health",
+      "aliases": [
+        "svc"
+      ]
+    },
+    {
+      "name": "forge",
+      "category": "agents",
+      "description": "Dispatch a task to an agent via Forge",
+      "aliases": [
+        "f"
+      ]
+    },
+    {
+      "name": "logs",
+      "category": "system",
+      "description": "Show recent log entries from Chronicle",
+      "aliases": []
+    },
+    {
+      "name": "model",
+      "category": "llm",
+      "description": "Show or set the LLM model",
+      "aliases": []
+    },
+    {
+      "name": "clear",
+      "category": "shell",
+      "description": "Clear the terminal",
+      "aliases": [
+        "cls"
+      ]
+    },
+    {
+      "name": "memory",
+      "category": "memory",
+      "description": "Query or store memory",
+      "aliases": [
+        "mem"
+      ]
+    },
+    {
+      "name": "search",
+      "category": "search",
+      "description": "Unified search across code, docs, and web",
+      "aliases": [
+        "s"
+      ]
+    },
+    {
+      "name": "context",
+      "category": "context",
+      "description": "Show context layers and dashboard",
+      "aliases": [
+        "ctx"
+      ]
+    },
+    {
+      "name": "swarm",
+      "category": "agents",
+      "description": "Dispatch task to swarm coding engine",
+      "aliases": []
+    },
+    {
+      "name": "tools",
+      "category": "system",
+      "description": "List available MCP tools",
+      "aliases": []
+    },
+    {
+      "name": "codegraph",
+      "category": "search",
+      "description": "Search code via CodeGraph",
+      "aliases": [
+        "cg"
+      ]
+    },
+    {
+      "name": "deploy",
+      "category": "ops",
+      "description": "Deploy a service",
+      "aliases": []
+    },
+    {
+      "name": "git",
+      "category": "git",
+      "description": "Git status, diff, commit",
+      "aliases": []
+    },
+    {
+      "name": "github",
+      "category": "git",
+      "description": "GitHub issues and PRs",
+      "aliases": [
+        "gh"
+      ]
+    },
+    {
+      "name": "recall",
+      "category": "memory",
+      "description": "Recall past decisions and context",
+      "aliases": []
+    },
+    {
+      "name": "soul",
+      "category": "personality",
+      "description": "Load or list personality souls",
+      "aliases": []
+    },
+    {
+      "name": "config",
+      "category": "shell",
+      "description": "Shell configuration",
+      "aliases": [
+        "cfg"
+      ]
+    },
+    {
+      "name": "benchmark",
+      "category": "llm",
+      "description": "Run or view model benchmarks",
+      "aliases": [
+        "bench"
+      ]
+    },
+    {
+      "name": "sessions",
+      "category": "shell",
+      "description": "List or resume past sessions",
+      "aliases": []
+    },
+    {
+      "name": "workflow",
+      "category": "automation",
+      "description": "Create or run workflows",
+      "aliases": [
+        "wf"
+      ]
+    },
+    {
+      "name": "train",
+      "category": "llm",
+      "description": "Training management",
+      "aliases": []
+    },
+    {
+      "name": "security",
+      "category": "security",
+      "description": "Run security scan",
+      "aliases": [
+        "sec"
+      ]
+    },
+    {
+      "name": "chaos",
+      "category": "testing",
+      "description": "Run chaos testing campaign",
+      "aliases": []
+    },
+    {
+      "name": "inbox",
+      "category": "agents",
+      "description": "Check agent inbox and delegations",
+      "aliases": []
+    },
+    {
+      "name": "roadmap",
+      "category": "project",
+      "description": "View project roadmap",
+      "aliases": []
+    },
+    {
+      "name": "metrics",
+      "category": "system",
+      "description": "Show system metrics summary",
+      "aliases": []
+    },
+    {
+      "name": "backup",
+      "category": "ops",
+      "description": "Create or list backups",
+      "aliases": []
+    },
+    {
+      "name": "explain",
+      "category": "llm",
+      "description": "Explain code or concept",
+      "aliases": []
+    },
+    {
+      "name": "review",
+      "category": "agents",
+      "description": "Submit code for review",
+      "aliases": []
+    },
+    {
+      "name": "fleet",
+      "category": "ops",
+      "description": "Manage GPU fleet",
+      "aliases": []
+    },
+    {
+      "name": "node",
+      "category": "ops",
+      "description": "Onboard and manage mesh compute nodes",
+      "aliases": [
+        "nodes"
+      ]
+    },
+    {
+      "name": "safety",
+      "category": "security",
+      "description": "View or set content safety levels",
+      "aliases": []
+    },
+    {
+      "name": "lockbox",
+      "category": "security",
+      "description": "Manage private content lockbox",
+      "aliases": [
+        "lb"
+      ]
+    },
+    {
+      "name": "demo",
+      "category": "ops",
+      "description": "Manage the minimal demo stack (start/stop/status)",
+      "aliases": []
+    },
+    {
+      "name": "gaming",
+      "category": "ops",
+      "description": "Switch to gaming mode (free GPU) or resume demo",
+      "aliases": [
+        "game"
+      ]
+    },
+    {
+      "name": "repowise",
+      "category": "search",
+      "description": "Ask codebase questions via Repowise",
+      "aliases": [
+        "rw"
+      ]
+    },
+    {
+      "name": "expedition",
+      "category": "project",
+      "description": "Manage expeditions",
+      "aliases": [
+        "exp"
+      ]
+    },
+    {
+      "name": "routines",
+      "category": "automation",
+      "description": "Manage automation routines",
+      "aliases": [
+        "rt"
+      ]
+    },
+    {
+      "name": "secrets",
+      "category": "security",
+      "description": "Manage secrets vault",
+      "aliases": []
+    },
+    {
+      "name": "generate",
+      "category": "creative",
+      "description": "Generate images via Canvas/Iris",
+      "aliases": [
+        "gen",
+        "img"
+      ]
+    },
+    {
+      "name": "rbac",
+      "category": "security",
+      "description": "Manage roles, users, groups",
+      "aliases": []
+    },
+    {
+      "name": "acc",
+      "category": "search",
+      "description": "AVEC code analysis via ACC",
+      "aliases": []
+    },
+    {
+      "name": "sttp",
+      "category": "memory",
+      "description": "Session memory via STTP",
+      "aliases": []
+    },
+    {
+      "name": "stacks",
+      "category": "llm",
+      "description": "Switch model stacks",
+      "aliases": [
+        "stack"
+      ]
+    },
+    {
+      "name": "speak",
+      "category": "creative",
+      "description": "Text-to-speech via Lyra",
+      "aliases": [
+        "tts"
+      ]
+    },
+    {
+      "name": "cloud",
+      "category": "ops",
+      "description": "Deploy models to cloud GPUs (Vast.ai/RunPod)",
+      "aliases": [
+        "gpu-deploy"
+      ]
+    },
+    {
+      "name": "models",
+      "category": "llm",
+      "description": "Model routing: profiles, effort tiers, reasoning swap",
+      "aliases": []
+    },
+    {
+      "name": "v4",
+      "category": "llm",
+      "description": "Elevate prompt to V4 reasoning model",
+      "aliases": [
+        "elevate",
+        "deepseek"
+      ]
+    },
+    {
+      "name": "docker",
+      "category": "ops",
+      "description": "Manage Docker containers (up/down/status/build/restart/logs/ps)",
+      "aliases": [
+        "dc"
+      ]
+    },
+    {
+      "name": "notebook",
+      "category": "agents",
+      "description": "Create, run, or list agent notebooks",
+      "aliases": [
+        "nb"
+      ]
+    },
+    {
+      "name": "products",
+      "category": "ops",
+      "description": "Manage standalone product instances (deploy/list/status/destroy)",
+      "aliases": [
+        "prod"
+      ]
+    },
+    {
+      "name": "tool-scope",
+      "category": "security",
+      "description": "View or modify workspace tool access (allow/deny)",
+      "aliases": [
+        "scope"
+      ]
+    },
+    {
+      "name": "compose",
+      "category": "agents",
+      "description": "Compose a new agent (identity + tools + reasoning + deploy)",
+      "aliases": [
+        "agent-new"
+      ]
+    },
+    {
+      "name": "monitor",
+      "category": "agents",
+      "description": "Show real-time agent performance metrics",
+      "aliases": [
+        "mon"
+      ]
+    },
+    {
+      "name": "compute",
+      "category": "ops",
+      "description": "Discover and manage compute fabric (backends/nodes/scale)",
+      "aliases": [
+        "fabric"
+      ]
+    },
+    {
+      "name": "publish-preflight",
+      "category": "dev",
+      "description": "Check a package can actually publish, before anything is uploaded",
+      "aliases": [
+        "preflight"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,197 @@
+[
+  {
+    "type": "session_start",
+    "data": {
+      "session_id": "test-complex",
+      "agent": "aither",
+      "model": "qwen36-27b"
+    }
+  },
+  {
+    "type": "classify",
+    "data": {
+      "intent": "research",
+      "effort": { "level": "7", "tier": "reasoning" }
+    }
+  },
+  {
+    "type": "plan_ready",
+    "data": {
+      "steps": [
+        { "name": "search", "description": "Find relevant information" },
+        { "name": "analyze", "description": "Analyze the results" }
+      ]
+    }
+  },
+  {
+    "type": "tool_selection",
+    "data": {
+      "tool_names": ["github_list_issues", "search_web", "fetch_url"]
+    }
+  },
+  {
+    "type": "think_start",
+    "data": {
+      "depth": "deep",
+      "model": "qwen36-27b"
+    }
+  },
+  {
+    "type": "context_stage",
+    "data": {
+      "stage": "gathering knowledge-base",
+      "message": "searching for relevant documents"
+    }
+  },
+  {
+    "type": "context_stage",
+    "data": {
+      "stage": "gathering knowledge-base",
+      "message": "searching for relevant documents"
+    }
+  },
+  {
+    "type": "context_stage",
+    "data": {
+      "stage": "gathering knowledge-base",
+      "message": "searching for relevant documents"
+    }
+  },
+  {
+    "type": "context_stage",
+    "data": {
+      "stage": "gathering from recent-context",
+      "detail": "fetching user message history"
+    }
+  },
+  {
+    "type": "context_stage",
+    "data": {
+      "stage": "gather complete",
+      "detail": "assembled 2450 tokens"
+    }
+  },
+  {
+    "type": "middleware_progress",
+    "data": {
+      "middleware": "auth-check",
+      "stage": "validating credentials",
+      "elapsed_ms": 45
+    }
+  },
+  {
+    "type": "middleware_progress",
+    "data": {
+      "middleware": "rate-limit-check",
+      "stage": "checking rate limits",
+      "elapsed_ms": 23
+    }
+  },
+  {
+    "type": "middleware_progress",
+    "data": {
+      "middleware": "telemetry-emit",
+      "stage": "logging event",
+      "elapsed_ms": 12
+    }
+  },
+  {
+    "type": "mcts_iteration",
+    "data": {
+      "iteration": "1",
+      "total": "50",
+      "best_value": "0.85"
+    }
+  },
+  {
+    "type": "mcts_iteration",
+    "data": {
+      "iteration": "2",
+      "total": "50",
+      "best_value": "0.86"
+    }
+  },
+  {
+    "type": "mcts_iteration",
+    "data": {
+      "iteration": "3",
+      "total": "50",
+      "best_value": "0.87"
+    }
+  },
+  {
+    "type": "llm_start",
+    "data": {
+      "model": "qwen36-27b",
+      "prompt_tokens_est": 3100,
+      "has_tools": true,
+      "has_thinking": true
+    }
+  },
+  {
+    "type": "pipeline_timeout",
+    "data": {
+      "reason": "grace_period_exceeded",
+      "timeout_ms": 8000,
+      "message": "LLM response grace period exceeded 8s, proceeding with partial results"
+    }
+  },
+  {
+    "type": "guard_rescue",
+    "data": {
+      "broken_promise": "Let me search for that information",
+      "reason": "Interrupted by timeout guard",
+      "recovery": "Fallback to faster model"
+    }
+  },
+  {
+    "type": "answer_segment",
+    "data": {
+      "kind": "continuation",
+      "reason": "After timeout rescue"
+    }
+  },
+  {
+    "type": "token",
+    "data": {
+      "token": "I found",
+      "t": "I found"
+    }
+  },
+  {
+    "type": "token",
+    "data": {
+      "token": " some",
+      "t": " some"
+    }
+  },
+  {
+    "type": "token",
+    "data": {
+      "token": " helpful",
+      "t": " helpful"
+    }
+  },
+  {
+    "type": "token",
+    "data": {
+      "token": " information",
+      "t": " information"
+    }
+  },
+  {
+    "type": "answer",
+    "data": {
+      "answer": "I found some helpful information about the topic, though the response was interrupted by a grace period timeout. The query required deep reasoning, so the system automatically escalated and provided a faster response path."
+    }
+  },
+  {
+    "type": "complete",
+    "data": {
+      "content": "I found some helpful information about the topic, though the response was interrupted by a grace period timeout. The query required deep reasoning, so the system automatically escalated and provided a faster response path.",
+      "duration_ms": 9200,
+      "model": "qwen36-27b",
+      "tokens_used": 450
+    }
+  }
+]

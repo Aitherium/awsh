@@ -1,0 +1,52 @@
+{
+  "name": "awsh",
+  "version": "1.18.0",
+  "description": "awsh - your terminal answers you. Type a question where a command would go, and get an answer instead of \"command not found\".",
+  "license": "BUSL-1.1",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Aitherium/AitherOS.git",
+    "directory": ".PRODUCTS/.AITHERSHELL/cli"
+  },
+  "bin": {
+    "awsh": "./dist/main.js",
+    "aither": "./dist/main.js",
+    "aither-shell": "./dist/main.js"
+  },
+  "files": [
+    "dist/**/*.js",
+    "dist/**/*.d.ts",
+    "dist/**/*.js.map",
+    "package.json",
+    "README.md"
+  ],
+  "scripts": {
+    "dev": "tsx src/main.ts",
+    "sync-version": "node scripts/sync-version.mjs",
+    "version:check": "node scripts/sync-version.mjs --check",
+    "build": "node scripts/sync-version.mjs --check && tsc",
+    "build:standalone": "bun build --compile src/main.ts --outfile dist/aither-shell",
+    "start": "node dist/main.js",
+    "test": "node --import tsx --test \"test/**/*.test.ts\"",
+    "test:tui": "node --import tsx --test test/timeline.test.ts test/controller.test.ts test/wide-chars.test.ts test/verdict-model.test.ts",
+    "tui:replay": "tsx scripts/tui-replay.ts"
+  },
+  "dependencies": {
+    "@inquirer/prompts": "^8.3.2",
+    "chalk": "^5.4.0",
+    "marked": "^15.0.0",
+    "marked-terminal": "^7.3.0",
+    "neo-blessed": "^0.2.0",
+    "ora": "^8.2.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.8.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "homepage": "https://aitherium.github.io/awsh/"
+}

@@ -19,7 +19,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          # 22, not 20: `node --test "glob"` only globs on >=21 -- on 20 the
+          # pattern is a literal filename and every suite "Could not find".
+          node-version: 22
       - name: install
         run: npm install
       - name: build

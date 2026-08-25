@@ -1,0 +1,161 @@
+# Publish awsh to npm from the PUBLIC mirror (Aitherium/awsh).
+#
+# THIS FILE IS THE CANONICAL COPY OF THE MIRROR'S WORKFLOW. It lives in the
+# monorepo so it is reviewed and versioned here, exactly like
+# AitherOS/packages/awfind/.github/workflows/pypi-publish.yml. The sync lane
+# PRESERVES the mirror's own .github (the sync token has no `workflow` scope), so
+# the first copy has to be created on the mirror by hand or by a token that has
+# it. After that the contents match and the sync is a no-op for this path.
+#
+# WHY PUBLISH FROM THE MIRROR RATHER THAN FROM AitherOS:
+#
+#   1. PROVENANCE. npm REJECTS provenance from a private repo, and AitherOS is
+#      private -- release-aithershell.yml carries that finding in a comment and
+#      publishes without it. A public mirror gets provenance for free, which is
+#      the whole point of publishing a CLI strangers install.
+#   2. NO LONG-LIVED TOKEN. Trusted publishing over OIDC needs `id-token: write`
+#      and nothing else. There is no NPM_TOKEN on this org and there does not need
+#      to be one.
+#   3. Hosted runners are fine HERE. `ubuntu-latest` is billing-dead on the
+#      private org (SHW004: the job is created, no runner takes it, and it fails
+#      with ZERO steps and no log) -- but a PUBLIC repo has its own free minutes.
+#      Same line, opposite outcome, depending on which repo it runs in.
+#
+# 🚨 THE TRAP THIS SETUP ALREADY HIT ONCE, ELSEWHERE. A trusted publisher is keyed
+# to (package, repo, workflow filename). The aither-adk -> awdk rename changed two
+# of those at once, the stored publisher matched nothing, and every upload failed
+# `invalid-publisher` -- which is why publish-awdk.yml fell back to token auth and
+# says re-pointing it "is a pypi.org admin action, not a repo change". awsh has
+# just been through the same shape of rename (AitherShell -> awsh). So configure
+# the trusted publisher AFTER the names settle, and if this file is ever renamed,
+# re-point the publisher in the same change.
+#
+# npm ALSO requires the package to exist before a trusted publisher can be
+# configured on it, so a brand-new name needs one bootstrap publish first.
+name: Publish awsh to npm
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Build and verify only. "true" to skip publishing.'
+        required: false
+        default: "false"
+
+permissions:
+  id-token: write        # the ONLY credential: OIDC trusted publishing
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: npm
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # OIDC trusted publishing needs npm >= 11.5.1, which ships with
+          # Node >= 22.14. Pinning 22 and upgrading npm below covers both.
+          node-version: "22"
+          registry-url: https://registry.npmjs.org
+
+      - name: Install and build
+        run: |
+          set -e
+          npm ci --no-audit --no-fund
+          npm run build
+
+      - name: Tests
+        # NEVER pipe this. `cmd | tail` reports TAIL's exit status, which has
+        # turned a red gate green in this project's transcripts more than once.
+        #
+        # The glob is left to the SHELL rather than to node. Node 22 (pinned
+        # above) does expand it, so this is not the Node-20 literal-path defect
+        # that kept the monorepo lane red -- it closes the other half:
+        # a zero match and a full green run are the SAME exit code, and this is
+        # the lane that publishes. An empty test run must never ship a version
+        # that cannot be taken back.
+        run: |
+          set -e
+          FILES=$(find test -name '*.test.ts' -type f | sort)
+          if [ -z "$FILES" ]; then
+            echo "no test files matched -- refusing to treat an empty test run as a pass" >&2
+            exit 1
+          fi
+          echo "running $(echo "$FILES" | wc -l) test file(s)"
+          node --import tsx --test $FILES
+
+      - name: Every bin must resolve to a file that exists
+        # npm creates the shim regardless, so a bad `bin` path installs cleanly
+        # and then fails on EVERY invocation -- and a published version cannot be
+        # taken back.
+        run: |
+          node -e '
+            const fs = require("fs"), pkg = require("./package.json");
+            let bad = 0;
+            for (const [n, rel] of Object.entries(pkg.bin || {})) {
+              if (!fs.existsSync(rel)) { console.error(`  x bin ${n} -> ${rel} MISSING`); bad++; }
+              else console.log(`  ok bin ${n} -> ${rel}`);
+            }
+            if (bad) process.exit(1);
+          '
+
+      - name: The shell integration must parse in a real shell
+        # Emitting plausible-looking text the shell REJECTS is the silent failure
+        # this feature is most exposed to: `init` would print a snippet and
+        # install nothing.
+        run: |
+          set -e
+          node dist/main.js init bash > /tmp/awsh-init.bash && bash -n /tmp/awsh-init.bash
+          echo "  ok bash integration parses"
+
+      - name: Publish dry-run (always, so a real publish never surprises)
+        run: npm publish --dry-run
+
+      - name: Publish awsh
+        if: ${{ github.event_name == 'release' || inputs.dry_run != 'true' }}
+        env:
+          # BOOTSTRAP ONLY, and it removes itself. npm refuses to attach a
+          # trusted publisher to a package that does not yet EXIST, so the first
+          # ever publish of a new name cannot use OIDC: measured on run
+          # 32643613538, where every step passed and the upload died
+          # `E404 PUT https://registry.npmjs.org/awsh`.
+          #
+          # Setting this DISABLES trusted publishing and therefore provenance,
+          # which is the whole reason this job lives on the public mirror -- so
+          # it is a branch, not a replacement. awdk's equivalent lane hardcodes
+          # its token with a comment asking someone to delete the line later;
+          # that keeps working and quietly forfeits provenance for as long as
+          # anyone forgets. Here, DELETING THE SECRET restores provenance with
+          # no code change and nothing to remember.
+          #
+          # After the first successful publish: register the trusted publisher
+          # on npmjs.com (package -> Settings -> Trusted Publisher ->
+          # Aitherium/awsh, workflow npm-publish.yml), then delete the NPM_TOKEN
+          # secret from this repo. The next run goes back to OIDC on its own.
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -e
+          npm install -g npm@latest >/dev/null 2>&1 || true
+          if [ -n "$NODE_AUTH_TOKEN" ]; then
+            echo "::warning::NPM_TOKEN present - publishing with TOKEN auth, so"\
+                 "this release carries NO provenance. Delete the secret once the"\
+                 "trusted publisher is registered."
+            npm publish --access public
+          else
+            npm publish --provenance --access public
+          fi
+
+      - name: Publish the alias packages
+        if: ${{ github.event_name == 'release' || inputs.dry_run != 'true' }}
+        # These only DEPEND on awsh -- never a copy of the code, so an old name
+        # can never serve different behaviour from the new one.
+        run: |
+          set -e
+          for d in npm-aliases/*/; do
+            echo "--- publishing $d"
+            ( cd "$d" && npm publish --provenance --access public )
+          done

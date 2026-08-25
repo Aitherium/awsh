@@ -7,8 +7,8 @@
     "awsh": "1.18.0"
   },
   "bin": {
-    "awshell": "bin/awsh.js",
-    "awsh": "bin/awsh.js"
+    "awshell": "./bin/awsh.js",
+    "awsh": "./bin/awsh.js"
   },
   "files": [
     "bin/**/*.js",
@@ -17,7 +17,6 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Aitherium/AitherOS.git",
-    "directory": ".PRODUCTS/.AITHERSHELL/cli"
+    "url": "git+https://github.com/Aitherium/awsh.git"
   }
 }

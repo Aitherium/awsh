@@ -41,11 +41,19 @@ jobs:
           set -euo pipefail
           V="$(node -p "require('./package.json').version")"
           echo "version=$V" >> "$GITHUB_OUTPUT"
-          if gh release view "v$V" >/dev/null 2>&1; then
+          # "The release exists" is NOT the question -- the npm lane creates
+          # tag-only releases with zero assets (measured: v1.18.6 had none).
+          # The question is whether the BINARIES are published. An existing
+          # release missing them gets the binaries uploaded into it.
+          N="$(gh release view "v$V" --json assets \
+                 --jq '[.assets[] | select(.name | startswith("aither-shell-"))] | length' \
+                 2>/dev/null || echo 0)"
+          if [ "${N:-0}" -ge 3 ]; then
             echo "exists=true" >> "$GITHUB_OUTPUT"
-            echo "v$V already released -- nothing to do"
+            echo "v$V already carries $N binaries -- nothing to do"
           else
             echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "v$V carries ${N:-0} binaries -- building"
           fi
 
   build:
@@ -101,11 +109,18 @@ jobs:
           ls -lh
           sha256sum * > SHA256SUMS
           V="${{ needs.prepare.outputs.version }}"
-          gh release create "v$V" \
-            --repo "$GITHUB_REPOSITORY" \
-            --title "awsh v$V" \
-            --notes "Standalone binaries built by CI on GitHub-hosted runners (linux-x64, win64, macos-arm64). Verify against SHA256SUMS. Also on npm: \`npm i -g @aitherium/awsh\`." \
-            *
+          NOTES="Standalone binaries built by CI on GitHub-hosted runners (linux-x64, win64, macos-arm64). Verify against SHA256SUMS. Also on npm: \`npm i -g @aitherium/awsh\`."
+          if gh release view "v$V" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            # The npm lane already made the (tag-only) release -- add the
+            # binaries to it rather than deleting a tag other tooling may pin.
+            gh release upload "v$V" --repo "$GITHUB_REPOSITORY" --clobber *
+          else
+            gh release create "v$V" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "awsh v$V" \
+              --notes "$NOTES" \
+              *
+          fi
       - name: The release must actually carry the binaries
         env:
           GH_TOKEN: ${{ github.token }}

@@ -7,6 +7,7 @@ import ora, { type Ora } from 'ora';
 import { marked } from 'marked';
 import { markedTerminal } from 'marked-terminal';
 import { writeFileSync, mkdirSync, existsSync } from 'fs';
+import { VERSION } from './version.js';
 import { join, resolve } from 'path';
 import { homedir } from 'os';
 import { spawn } from 'child_process';
@@ -38,6 +39,149 @@ export const TRACE_FULL: boolean = (() => {
 export function osc8Link(url: string, label?: string): string {
   const text = label || url;
   return `\x1b]8;;${url}\x1b\\${chalk.cyan.underline(text)}\x1b]8;;\x1b\\`;
+}
+
+/**
+ * Make the links in a terminal answer CLICKABLE, and never lose the URL.
+ *
+ * The omnibox prints raw model text. A model asked for 'plain terminal text,
+ * no markdown' still emits markdown links about half the time, so the reader
+ * saw a literal `[CNN](https://www.cnn.com/)` -- and on the other half it
+ * dropped the URL entirely and listed bare source NAMES, which is a citation
+ * you cannot follow. Both were reported the same way: 'weak as hell and
+ * doesn't even give clickable links'.
+ *
+ * So: markdown links become OSC 8 hyperlinks on their label, and any bare URL
+ * left in the prose becomes one on itself. A terminal without OSC 8 support
+ * ignores the escape and still shows the label -- which is why the markdown
+ * form is REWRITTEN rather than merely detected: the fallback has to remain
+ * readable, and `[CNN](url)` is not.
+ *
+ * Deliberately conservative: no styling, no reflow, no bullet rewriting. This
+ * runs over the answer of every omnibox line, and a transform that guesses at
+ * structure would mangle the shell one-liners the same feature exists to print.
+ */
+export function linkifyTerminal(text: string): string {
+  if (!text) return text;
+  // ONE pass with an alternation, deliberately: a markdown pass followed by a
+  // bare-URL pass re-reads what the first pass emitted, and a link whose LABEL
+  // is itself a URL then gets an OSC 8 sequence nested inside another and the
+  // terminal prints the raw bytes. A single non-overlapping scan cannot do that.
+  return text.replace(
+    /\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)|(https?:\/\/[^\s<>`'")\]]+)/g,
+    (_m: string, label: string, mdUrl: string, bareUrl: string) => {
+      if (bareUrl) {
+        // Trailing sentence punctuation is prose, not part of the URL. Kept
+        // OUTSIDE the link so the visible text still reads as a sentence.
+        const trimmed = bareUrl.replace(/[.,;:!?]+"*$/, '');
+        const tail = bareUrl.slice(trimmed.length);
+        return osc8Link(trimmed) + tail;
+      }
+      return osc8Link(mdUrl, label);
+    },
+  );
+}
+
+/** One row of a web-search tool result. */
+export interface SearchHit { title: string; url: string; snippet: string }
+
+/**
+ * Recover the SOURCES out of a search tool's text output.
+ *
+ * WHY THE SHELL PARSES THIS INSTEAD OF TRUSTING THE ANSWER. Measured
+ * 2026-08-23 against the live AitherSearch lane: the tool returned five dated
+ * stories with full URLs and real snippets, and the 4B orchestrator answered
+ * with a numbered list of OUTLET NAMES and generic blurbs -- 'CNN - Breaking
+ * news, latest updates' -- naming outlets that were not in the tool result at
+ * all. The retrieval was good and the synthesis threw it away, which is
+ * indistinguishable to the reader from a bad search.
+ *
+ * So the sources are printed from the TOOL OUTPUT, not from the prose. Same
+ * reasoning as answerFromSituation(): a fact the shell already holds must not
+ * depend on a small model's mood.
+ *
+ * Format-agnostic on purpose -- awfind emits title/url/snippet triples and the
+ * DuckDuckGo fallback emits its own shape, and pinning either spelling makes
+ * this silently return nothing the day the other one is in use. A URL line is
+ * the anchor; the nearest non-URL line above it is the title, below it the
+ * snippet.
+ */
+export function parseSearchHits(output: string, limit = 5): SearchHit[] {
+  if (!output) return [];
+  // TWO shapes, because two different tools answer this question and the model
+  // picks either one. Measured 2026-08-23: the omnibox called `dr_web_search`,
+  // which returns JSON, while `web_search` returns title/url/snippet triples as
+  // TEXT -- and a parser written for one silently returns [] for the other,
+  // which prints no sources and is indistinguishable from a search that found
+  // nothing. Handle the JSON shape first; fall through to the line scan.
+  try {
+    const parsed = JSON.parse(output);
+    const rows = Array.isArray(parsed) ? parsed : (parsed?.results || parsed?.hits);
+    if (Array.isArray(rows)) {
+      const out: SearchHit[] = [];
+      for (const r of rows) {
+        const url = String(r?.url || r?.link || r?.href || '');
+        const title = String(r?.title || r?.name || '');
+        if (!url || !title) continue;
+        out.push({ title, url, snippet: String(r?.snippet || r?.description || r?.text || '') });
+        if (out.length >= limit) break;
+      }
+      if (out.length) return out;
+    }
+  } catch { /* not JSON -- the salvage and line scan below are the other shapes */ }
+  // TRUNCATED JSON is the common case, not an edge case: the daemon caps tool
+    // output (measured at 500 chars), which cuts the array mid-object so
+  // JSON.parse throws and a strict parser reports NO SOURCES for a search that
+  // worked perfectly. Salvage the complete title/url pairs that did survive.
+  if (/["']url["']\s*:/.test(output)) {
+    const salvaged: SearchHit[] = [];
+    const seenU = new Set<string>();
+    const re = /["']title["']\s*:\s*"((?:[^"\\]|\\\\.)*)"[^{}]*?["']url["']\s*:\s*"((?:[^"\\]|\\\\.)*)"/g;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(output)) !== null) {
+      const url = m[2];
+      if (!url || seenU.has(url)) continue;
+      seenU.add(url);
+      salvaged.push({ title: m[1], url, snippet: '' });
+      if (salvaged.length >= limit) break;
+    }
+    if (salvaged.length) return salvaged;
+  }
+  const lines = output.split(/\r?\n/).map((l) => l.trim());
+  const isUrl = (l: string) => /^https?:\/\//.test(l);
+  const hits: SearchHit[] = [];
+  const seen = new Set<string>();
+  for (let i = 0; i < lines.length; i++) {
+    if (!isUrl(lines[i])) continue;
+    const url = lines[i];
+    if (seen.has(url)) continue;
+    seen.add(url);
+    let title = '';
+    for (let j = i - 1; j >= 0 && j > i - 4; j--) {
+      if (lines[j] && !isUrl(lines[j])) { title = lines[j]; break; }
+    }
+    let snippet = '';
+    for (let j = i + 1; j < lines.length && j < i + 4; j++) {
+      if (lines[j] && !isUrl(lines[j])) { snippet = lines[j]; break; }
+    }
+    // A hit with no title is a bare link in prose, not a search result. Keeping
+    // it would put an unlabelled URL in a list headed 'Sources'.
+    if (!title) continue;
+    hits.push({ title, url, snippet });
+    if (hits.length >= limit) break;
+  }
+  return hits;
+}
+
+/** Render recovered sources as a compact, clickable block. */
+export function renderSources(hits: SearchHit[]): string {
+  if (!hits.length) return '';
+  const out = [chalk.dim('  sources')];
+  hits.forEach((h, n) => {
+    out.push('  ' + chalk.dim(String(n + 1) + '.') + ' ' + osc8Link(h.url, h.title));
+    if (h.snippet) out.push('     ' + chalk.dim(h.snippet.slice(0, 140)));
+  });
+  return out.join('\n');
 }
 
 /* ── Banner ─────────────────────────────────────────────────── */
@@ -73,8 +217,24 @@ export function renderBanner(info: {
   serviceLines?: { name: string; up: boolean }[];
   backendType?: string;
   backendName?: string;
+  // D-2170: explicit override for terminal width, so a test can control it
+  // directly instead of mutating process.stdout.columns via
+  // Object.defineProperty. That mutation is provably environment-dependent
+  // — reproduced clean under Node 22 locally, still failed on the actual
+  // GitHub Actions runner (banner-width.test.ts, 2026-08-24) — most likely
+  // because a real pty-backed WriteStream there exposes `columns` via a
+  // prototype getter/setter pair that an own-property override can shadow
+  // inconsistently depending on how the runtime resolves it, where a piped
+  // non-TTY stream (this dev box, most CI test harnesses) has no such
+  // descriptor to fight at all. An explicit param has no such ambiguity.
+  columns?: number;
 }) {
-  const version = 'v1.18.0';  // keep in sync with package.json
+  // Read at runtime from package.json via version.ts, never baked. The literal
+  // that was here carried the comment "keep in sync with package.json", and
+  // that is precisely the thing a comment cannot do: the release lane bumps the
+  // version in CI, so any literal committed to the repo is stale at the moment
+  // of publish. It said v1.18.0 while the registry had 1.18.3.
+  const version = `v${VERSION}`;
   const title = `AitherShell ${version}`;
 
   let connected: string;
@@ -111,28 +271,61 @@ export function renderBanner(info: {
   // wordmark, a hairline rule, and status DOTS (\u25cf / \u25cb) instead of caps.
   const online = info.genesisOnline === true;
 
+  // FOUR LINES, then the prompt (owner decision, 2026-08-21). This printed
+  // TWELVE before you could type: a rule, two full service rosters naming every
+  // component up AND down, a warming spinner, "Logged in as David" twice, a
+  // keybinding row and an ad for /grid sync. A shell is a place to type, and
+  // everything above the cursor is a toll paid on every single launch.
+  //
+  // What survived is what changes what you would DO next: is the link up, how
+  // much of the fleet is up, and who you are. The per-service rosters move to
+  // /status -- which is where you look when the answer to "is the link up" was
+  // no, and nowhere else was that roster ever acted on.
+  // WIDTH-AWARE, because the trimmed header was still 100 columns wide and 80
+  // is the default terminal. A status line that WRAPS is worse than the twelve
+  // lines it replaced: it costs two rows anyway and the second one is a ragged
+  // fragment. Segments are dropped from the LEAST decisive end -- the down
+  // count, then the model, then the service count -- so what survives at any
+  // width is the one thing that changes what you do next: is the link up, and
+  // to what.
+  const budget = Math.max(40, (info.columns ?? process.stdout.columns ?? 80) - 4);
+  // Counted by scanning, not by a regex: an ANSI-stripping pattern needs a
+  // literal ESC and a backslash class, and every edit through a shell has
+  // silently mangled one or the other in this file today. This needs neither.
+  const ESC = String.fromCharCode(27);
+  const visible = (s: string): number => {
+    let n = 0;
+    let inEscape = false;
+    for (const ch of s) {
+      if (ch === ESC) { inEscape = true; continue; }
+      if (inEscape) { if (ch === 'm') inEscape = false; continue; }
+      n++;
+    }
+    return n;
+  };
+  const head = T.dot(online) + ' ' + (online ? T.muted(connected) : T.bad(connected));
+  // Segments are INDIVIDUAL, not one bundled string: joining them first made it
+  // all-or-nothing, so an 80-column terminal lost the service count to make
+  // room for a model name it could not fit either. And a segment that does not
+  // fit is SKIPPED, not a stop -- otherwise one long middle segment hides every
+  // shorter one behind it. Ordered most-decisive first.
+  const optional: string[] = [];
+  if (info.services != null) optional.push(`${info.services} services`);
+  else if (upCount > 0) optional.push(`${upCount} services`);
+  if (downNames.length > 0) optional.push(`${downNames.length} down`);
+  if (info.agents != null) optional.push(`${info.agents} agents`);
+  if (info.llm) optional.push(info.llm);
+  let statusLine = head;
+  for (const seg of optional) {
+    const candidate = statusLine + T.dim('  ·  ') + T.dim(seg);
+    if (visible(candidate) <= budget) statusLine = candidate;
+  }
   console.log();
   console.log('  ' + T.wordmark() + '  ' + T.dim(version));
-  console.log('  ' + T.rule());
-
-  // Line 1 \u2014 link state + fleet stats, one scannable row.
-  console.log('  ' + T.metaJoin([
-    T.dot(online) + ' ' + (online ? T.muted(connected) : T.bad(connected)),
-    T.dim(stats),
-  ]));
-
-  // Line 2 \u2014 services as glyph groups; a long list wraps naturally instead of
-  // stretching a box border off-screen (the old layout's failure mode).
-  if (upNames.length > 0) {
-    console.log('  ' + T.dot(true) + ' ' + T.dim(upNames.join(T.dim(' \u00b7 '))));
-  }
-  if (downNames.length > 0) {
-    console.log('  ' + T.dot(false) + ' ' + T.bad(downNames.join(' \u00b7 ')));
-  }
+  console.log('  ' + statusLine);
   if (userLine) {
     console.log('  ' + T.violet(T.G.agent) + ' ' + T.dim(userLine));
   }
-  console.log();
 }
 
 /* ── Output cleanup ────────────────────────────────────────── */
@@ -735,6 +928,15 @@ export function createStreamRenderer(sessionId?: string, prompt?: string, steeri
               process.stdout.write(renderMarkdown(wrapBareCode(eagerAnswer)));
               if (!eagerAnswer.endsWith('\n')) process.stdout.write('\n');
               segmentTokenStreamed = true;  // guard against double-print at complete
+            } else if (segmentTokenStreamed && eagerAnswer && eagerAnswer.length > content.length
+                       && eagerAnswer.startsWith(content)) {
+              // The authoritative answer is LONGER than what streamed. Seen
+              // live 2026-08-23: the omnibox printed "...If you're asking
+              // about so" and stopped, while the `answer` event carried the
+              // whole sentence — and this branch discarded it. Print the tail
+              // rather than show a cut-off answer as if it were the answer.
+              process.stdout.write(eagerAnswer.slice(content.length));
+              if (!eagerAnswer.endsWith('\n')) process.stdout.write('\n');
             }
             content = eagerAnswer;
             contentDisplayed = true;
@@ -2010,7 +2212,27 @@ export function createStreamRenderer(sessionId?: string, prompt?: string, steeri
     finish() {
       stopSpinner();
       if (!hasOutput) {
-        console.log(chalk.dim('  (no response)'));
+        // "(no response)" alone is THREE different facts wearing one label: the
+        // model really did return nothing, the stream ended before any content
+        // arrived, or events arrived that this renderer has no branch for.
+        // Measured 2026-08-21: an omnibox turn sat 11.7s and printed exactly
+        // this, and there was no way to tell which -- so the next step was a
+        // guess, and the turn after it went back to working, which is how a
+        // real defect gets filed as "a transient".
+        //
+        // traceEvents already holds every event; the information was there and
+        // simply was not being said. Blanks are unknowns, not zeros.
+        const kinds = traceEvents.map((e) => e.type);
+        if (kinds.length === 0) {
+          console.log(chalk.dim(
+            '  (no response - the stream carried no events at all; the request '
+            + 'reached a server and it sent nothing)'));
+        } else {
+          const uniq = Array.from(new Set(kinds));
+          console.log(chalk.dim(
+            '  (no response - ' + kinds.length + ' event(s) arrived, none carried '
+            + 'content: ' + uniq.join(', ') + ')'));
+        }
       }
 
       // ── Status bar — compact summary after each response ──

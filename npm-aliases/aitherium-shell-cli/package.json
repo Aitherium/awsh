@@ -1,0 +1,23 @@
+{
+  "name": "@aitherium/shell-cli",
+  "version": "1.18.0",
+  "description": "RENAMED to `awsh`. Installs awsh so existing installs and scripts keep working.",
+  "license": "BUSL-1.1",
+  "dependencies": {
+    "awsh": "1.18.0"
+  },
+  "bin": {
+    "aither": "bin/awsh.js",
+    "aither-shell": "bin/awsh.js"
+  },
+  "files": [
+    "bin/**/*.js",
+    "package.json",
+    "README.md"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Aitherium/AitherOS.git",
+    "directory": ".PRODUCTS/.AITHERSHELL/cli"
+  }
+}

@@ -1,6 +1,6 @@
 {
-  "name": "awsh",
-  "version": "1.18.0",
+  "name": "@aitherium/awsh",
+  "version": "1.18.4",
   "description": "awsh - your terminal answers you. Type a question where a command would go, and get an answer instead of \"command not found\".",
   "license": "BUSL-1.1",
   "type": "module",
@@ -10,9 +10,9 @@
     "directory": ".PRODUCTS/.AITHERSHELL/cli"
   },
   "bin": {
-    "awsh": "./dist/main.js",
-    "aither": "./dist/main.js",
-    "aither-shell": "./dist/main.js"
+    "awsh": "dist/main.js",
+    "aither": "dist/main.js",
+    "aither-shell": "dist/main.js"
   },
   "files": [
     "dist/**/*.js",

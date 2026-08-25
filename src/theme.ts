@@ -270,7 +270,7 @@ export function gradient(s: string): string {
 // ── Primitives ─────────────────────────────────────────────────────────────
 
 /** The letter-spaced gradient wordmark, in bracket chrome. */
-export function wordmark(text = 'A I T H E R S H E L L'): string {
+export function wordmark(text = 'A W S H'): string {
   return dim('⟪ ') + gradient(text) + dim(' ⟫');
 }
 

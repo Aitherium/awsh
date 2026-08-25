@@ -102,6 +102,7 @@ if (process.env.NODE_TLS_REJECT_UNAUTHORIZED == null && _allPrivate) {
 import chalk from 'chalk';
 import { readFileSync } from 'fs';
 import { extname } from 'path';
+import { VERSION as SHELL_VERSION } from './version.js';
 import type { ShellConfig } from './config.js';
 import { loadConfig, setActiveConfig, deepseekProvider, kimiProvider, DEFAULT_AGENT} from './config.js';
 import { resolveBackend } from './backend-resolver.js';
@@ -151,7 +152,28 @@ async function resolveResume(
 // prompts user to send error report, creates GitHub issue automatically.
 installCrashReporter();
 
-const VERSION = '1.18.0';  // keep in sync with package.json
+/**
+ * Read from package.json at runtime, never hardcoded.
+ *
+ * This was a hardcoded literal mirrored from package.json by
+ * scripts/sync-version.mjs, and it drifted anyway. Measured 2026-08-23 against
+ * the PUBLISHED package: source said 1.18.0, the built artifact reported
+ * 1.18.2, and the published package.json said 1.18.3. THREE different answers
+ * to "what version am I running".
+ *
+ * (No version literal appears in this comment on purpose: sync-version.mjs
+ * matches `const VERSION = '...'` by regex, and a literal here would let the
+ * check pass by matching PROSE while the real code carried none.)
+ *
+ * The reason a constant can never work here is that the release lane BUMPS the
+ * version in CI (`prepare` resolves it, npm writes it), so the repo's copy is
+ * stale by construction at the moment of publish. A comment asking a human to
+ * keep two numbers in step is not a mechanism.
+ *
+ * `../package.json` is correct from BOTH layouts: dist/main.js -> package root
+ * (published), and src/main.ts -> cli/ (dev, run through tsx).
+ */
+const VERSION = SHELL_VERSION;
 
 async function main() {
   const args = process.argv.slice(2);
@@ -476,18 +498,104 @@ $rows | ForEach-Object { [Console]::Out.WriteLine("PATH=" + $_) }`;
     if (!line) process.exit(127);
 
     args.length = 0;
-    args.push(
-      'This was typed at a shell prompt where a command was expected, but no ' +
+
+    // ONE conversation per terminal. Each omnibox line is a separate process,
+    // and until 2026-08-23 each was a separate session too: the owner typed
+    // "what time is it", got the time, typed "how do you know that?" and the
+    // agent — with no memory of the previous line — answered a question about
+    // epistemology. The hook passes the shell's own $PID, so every line typed
+    // in that window resumes the same transcript; the session store already
+    // persists it and --resume already replays it. Deterministic answers
+    // (below) are recorded into it too, or the follow-up has nothing to follow.
+    const omniboxSid = `omnibox-${(process.env.AWSH_OMNIBOX_SESSION || String(process.ppid)).trim()}`;
+    const { loadSession: loadSess, recordTurn: recordOmniboxTurn } = await import('./session-store.js');
+    if (loadSess(omniboxSid)) args.push('--resume', omniboxSid);
+    else process.env.AWSH_OMNIBOX_NEW_SESSION = omniboxSid;
+    // The transcript must hold what the HUMAN typed, not the wrapper prompt
+    // below -- a resumed summary full of "This was typed at a shell prompt..."
+    // is noise the model then imitates.
+    process.env.AWSH_OMNIBOX_LINE = line;
+
+    // A pure state question (time, date, cwd, whoami, hostname) is answered by
+    // the SHELL, now, from its own registers -- not by the model. Measured
+    // 2026-08-23: with the clock in context the model stated the time on one
+    // run and on the next printed only `Get-Date -DisplayHint DateTime`, and
+    // on the owner's run echoed the line back. A fact the shell holds must not
+    // depend on a small model's mood -- and measured, it bolted junk `-Format`
+    // strings onto Get-Date on 5 of 6 runs however it was asked. So both
+    // halves are deterministic: the value, then the idiomatic command for
+    // THIS shell, and the model is not consulted at all.
+    const { answerFromSituation, collectSituation, sniffShellName } = await import('./situation.js');
+    const fact = answerFromSituation(line, collectSituation(sniffShellName() ?? ''));
+    if (fact) {
+      console.log(fact.value);
+      console.log(chalk.dim(`  ${fact.command}`));
+      // Into the terminal's transcript, so "how do you know that?" next has
+      // something to refer to. Phrased as the shell speaking, which it is.
+      try {
+        recordOmniboxTurn(omniboxSid, 'aither', line,
+          `${fact.value} -- I read this directly from this machine's own system ` +
+          `state (its clock / working directory / user / hostname), not from memory ` +
+          `or the internet. The shell command that prints the same value is: ${fact.command}`);
+      } catch { /* a transcript write must never fail the answer */ }
+      process.exit(0);
+    }
+
+    // The framing goes in the SYSTEM slot, and the bare line stays the MESSAGE.
+    //
+    // Until 2026-08-23 this text was concatenated in FRONT of the user's line,
+    // so the model received ~130 words of instructions with the question buried
+    // at the end -- and answered the instructions. Measured that day against the
+    // live daemon, same endpoint, same model, same registered tools, 3 runs each:
+    //
+    //     "what is in the news today"   no framing        : tool called 3/3
+    //                                    framing as system : tool called 3/3
+    //                                    framing prepended : tool called 0/3
+    //                                    prepended, reworded
+    //                                      to invite tools : tool called 1/3
+    //
+    // That last row is why this is a SLOT change and not a better sentence:
+    // rewording while leaving the text in the user slot moved 0/3 to 1/3, which
+    // reads like progress and is a coin flip.
+    //
+    // The user-visible symptom was the omnibox replying "I cannot directly fetch
+    // news" while web_search was registered, bound and answering when asked
+    // directly. A capability the model never considers is indistinguishable from
+    // one that does not exist -- the same class as the intent filter that hid
+    // these tools until the day before. Pinned by
+    // test/omnibox-framing-slot.test.ts, in BOTH directions: the framing must
+    // not be in the message, and it must not be lost.
+    process.env.AWSH_OMNIBOX_FRAMING =
+      'The user typed this at a shell prompt where a command was expected, but no ' +
       'such command exists. Work out what was meant and do it: answer the ' +
       'question if it is one; if it names a site or URL, say so and give the ' +
       'link; if it is a near-miss of a real command, say which and show the ' +
       'corrected line. Answer in a few lines of plain terminal text, no ' +
-      `markdown headers, no preamble. The line was: ${line}`,
-    );
+      'markdown headers, no preamble — and NEVER open by explaining that the ' +
+      'line is not a command or is a question; the user knows, just answer. ' +
+      'If a conversation so far is provided, the line may be a follow-up to ' +
+      'it: answer in that context. The current time, date, cwd, user and ' +
+      'host are in the [USER\'S SHELL] system block — if the line touches ' +
+      'any of those, read the real value from that block rather than calling a ' +
+      'tool, and never invent a sample date. For ANYTHING ELSE your tools are ' +
+      'available and you are expected to use them: if answering needs anything ' +
+      'current, live, or specific to this machine, call the tool first and ' +
+      'answer from its result rather than saying you are unable to look it up. ' +
+      // Only the SYNTHESIS instruction stays here. Asking for URLs too was
+      // tried and REMOVED: the longer framing dropped tool use to 2/3 (one run
+      // in three went back to "I do not have live news access"), and the links
+      // are no longer the model's job -- the shell prints the sources from the
+      // tool output itself, clickable, whatever the model chose to write.
+      'Lead with what the results actually SAY - the specific stories, findings ' +
+      'or values - never with a list of the sources you searched.';
+    args.push(line);
   }
 
   const config = loadConfig();
   setActiveConfig(config);
+  // First omnibox line in this terminal: no transcript to resume yet, but the
+  // turn must be RECORDED under the terminal's id so the next line can resume it.
+  if (process.env.AWSH_OMNIBOX_NEW_SESSION) config.sessionId = process.env.AWSH_OMNIBOX_NEW_SESSION;
   const client = new GenesisClient(config.genesisUrl);
 
   // Wire auth token from config to client
@@ -1142,6 +1250,11 @@ async function oneShotChat(
     agent: config.defaultAgent, sessionId: config.sessionId, model: config.model,
     effort: config.effort, safetyLevel: config.safetyLevel, privateMode: config.privateMode,
     attachments: config.imageAttachments, sessionContext,
+    // The omnibox's "this was typed at a shell prompt" framing rides here rather
+    // than in front of the user's words. See the omnibox branch above for the
+    // 0/3 -> 3/3 measurement that moved it.
+    ...(process.env.AWSH_OMNIBOX_FRAMING
+      ? { systemAdditions: [process.env.AWSH_OMNIBOX_FRAMING] } : {}),
   };
 
   // Collect answer/model/tools/tokens for recording + JSON output.
@@ -1149,9 +1262,17 @@ async function oneShotChat(
   let model = config.model || '';
   let agent = config.defaultAgent;
   const tools: string[] = [];
+  let searchOutput = '';
   let tokens = 0;
   const errors: string[] = [];
-  const renderer = (fmt === 'text') ? createStreamRenderer() : null;
+  // Omnibox answers are BUFFERED, not streamed: they are ~3 s and a few lines,
+  // and buffering lets the shell strip the opener the small model keeps
+  // producing despite instructions ("This was a question, not a command.") —
+  // measured 1 in 2 runs on the 4B orchestrator. A deterministic strip beats
+  // a prompt the model half-obeys.
+  const omnibox = !!process.env.AWSH_OMNIBOX_LINE;
+  const renderer = (fmt === 'text' && !omnibox) ? createStreamRenderer() : null;
+  const started = Date.now();
 
   try {
     for await (const event of client.streamChat(message, opts)) {
@@ -1172,6 +1293,18 @@ async function oneShotChat(
         case 'tool_call':
           for (const t of (d.tools || d.tool_calls || [])) tools.push(t.name || t.function?.name || 'tool');
           break;
+        // The SOURCES come from the TOOL OUTPUT, never from the prose.
+        // Measured 2026-08-23: the search returned five dated stories with
+        // real URLs and the 4B orchestrator answered with a list of outlet
+        // names that were not among them. Good retrieval, discarded by
+        // synthesis -- which reads to the user as a bad search.
+        case 'tool_result':
+          for (const r of (d.results || [])) {
+            if (!r?.success) continue;
+            if (!/(^|_)(search|research|find)/.test(String(r.tool || ''))) continue;
+            searchOutput += (searchOutput ? String.fromCharCode(10, 10) : '') + String(r.output || '');
+          }
+          break;
         case 'llm_done': case 'llm_end':
           if (d.model_used || d.model) model = d.model_used || d.model;
           tokens += Number(d.tokens_used || d.tokens || 0); break;
@@ -1183,6 +1316,28 @@ async function oneShotChat(
     }
     if (renderer) renderer.finish();
     if (renderer && answer === '') answer = renderer.getContent();
+    if (omnibox && fmt === 'text') {
+      const { stripOmniboxOpener } = await import('./situation.js');
+      const { linkifyTerminal } = await import('./renderer.js');
+      // A cited source you cannot click is a citation you cannot follow.
+      // The model emits markdown links about half the time despite being
+      // told not to, so the reader saw a literal [CNN](https://...); this
+      // turns both that and any bare URL into an OSC 8 hyperlink, and
+      // degrades to readable text on a terminal without OSC 8.
+      const text = linkifyTerminal(stripOmniboxOpener(answer));
+      if (text) process.stdout.write(text + (text.endsWith('\n') ? '' : '\n'));
+      else process.stdout.write(chalk.dim('  (no answer from the agent — try: awsh "' +
+                                          (process.env.AWSH_OMNIBOX_LINE || '') + '")\n'));
+      // Printed even when the prose already cites them: a duplicated source is
+      // noise, a source you cannot click is a dead end, and only one of those
+      // is recoverable by the reader.
+      if (searchOutput) {
+        const { parseSearchHits, renderSources } = await import('./renderer.js');
+        const block = renderSources(parseSearchHits(searchOutput));
+        if (block) process.stdout.write(String.fromCharCode(10) + block + String.fromCharCode(10));
+      }
+      process.stdout.write(chalk.dim(`  ⬢ ${agent}  ·  ${((Date.now() - started) / 1000).toFixed(1)}s\n`));
+    }
   } catch (err: any) {
     if (err.name === 'AbortError') return false;
     const msg = err.message || 'unknown error';
@@ -1201,7 +1356,8 @@ async function oneShotChat(
   }
 
   // Persist the turn (local transcript + remote sync) so --continue/--resume work.
-  try { recordTurn(config.sessionId, agent, message, answer, { model, tools, tokens }); } catch { /* */ }
+  const recordedUser = process.env.AWSH_OMNIBOX_LINE || message;
+  try { recordTurn(config.sessionId, agent, recordedUser, answer, { model, tools, tokens }); } catch { /* */ }
 
   if (fmt === 'json') {
     process.stdout.write(JSON.stringify({

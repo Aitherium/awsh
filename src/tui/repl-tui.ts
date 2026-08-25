@@ -779,6 +779,8 @@ export async function startTuiRepl(client: GenesisClient, config: ShellConfig): 
     host: welcomeHost,
     user: config.authUser?.display_name || config.authUser?.username,
     resumedMsg,
+    pack: config.packName,
+    packTitle: config.packTitle,
   })) surface.outputLine(line);
   idleStatus();
   surface.focusInput();

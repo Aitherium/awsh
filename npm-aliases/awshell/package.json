@@ -1,0 +1,23 @@
+{
+  "name": "awshell",
+  "version": "1.18.0",
+  "description": "Long-name alias for `awsh` - the same shell, for anyone who searches the full word.",
+  "license": "BUSL-1.1",
+  "dependencies": {
+    "awsh": "1.18.0"
+  },
+  "bin": {
+    "awshell": "bin/awsh.js",
+    "awsh": "bin/awsh.js"
+  },
+  "files": [
+    "bin/**/*.js",
+    "package.json",
+    "README.md"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Aitherium/AitherOS.git",
+    "directory": ".PRODUCTS/.AITHERSHELL/cli"
+  }
+}

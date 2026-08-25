@@ -15,11 +15,12 @@ import { createInterface } from 'node:readline';
 import { execSync } from 'node:child_process';
 import { hostname, platform, release, arch, cpus, totalmem } from 'node:os';
 import chalk from 'chalk';
+import { VERSION as SHELL_VERSION } from './version.js';
 
 const GENESIS_URL = process.env.AITHER_GENESIS_URL || 'http://localhost:8001';
 const GITHUB_REPO = 'Aitherium/AitherOS';
 const SUPPORT_URL = 'https://demo.aitherium.com/support';
-const VERSION = '1.10.0';  // keep in sync with package.json
+const VERSION = SHELL_VERSION;
 
 interface CrashReport {
   title: string;

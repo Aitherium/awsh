@@ -135,7 +135,13 @@ if (-not $global:__AwshOmnibox) {
 
         # 6. If awsh is not installed, behave EXACTLY as before. A missing
         #    omnibox must never swallow the error it was meant to improve on.
-        $exe = Get-Command awsh -CommandType Application -ErrorAction SilentlyContinue
+        # FIRST match only. Get-Command returns EVERY awsh on PATH, and with two
+        # shims installed (npm global + ~/bin, measured 2026-08-23) $exe.Source
+        # became two paths joined by a space -- which PowerShell then tried to
+        # run as one command and failed with 'not recognized'. The omnibox was
+        # dead on every typo while 'Get-Command awsh' looked perfectly healthy.
+        $exe = Get-Command awsh -CommandType Application -ErrorAction SilentlyContinue |
+               Select-Object -First 1
         if (-not $exe) { & $fallback; return }
         $exePath = $exe.Source
 
@@ -151,6 +157,10 @@ if (-not $global:__AwshOmnibox) {
             if ($name -match '^(?i)get-([^-]+)$') { $name = $Matches[1] }
             $line = (@($name) + @($args)) -join ' '
             $global:__AwshBusy = $true
+            # This shell's PID keys ONE transcript per terminal window, so a
+            # follow-up line ("how do you know that?") lands on the agent with
+            # the previous exchange in context instead of as a cold question.
+            $env:AWSH_OMNIBOX_SESSION = "$PID"
             try     { & $exePath ask --omnibox -- $line }
             finally { $global:__AwshBusy = $false }
         }.GetNewClosure()
@@ -249,7 +259,7 @@ ${fn}() {
     command -v awsh >/dev/null 2>&1 || { echo "$1: command not found" >&2; return 127; }
 
     __AWSH_BUSY=1
-    awsh ask --omnibox -- "$*"
+    AWSH_OMNIBOX_SESSION="$$" awsh ask --omnibox -- "$*"
     __awsh_rc=$?
     unset __AWSH_BUSY
     return $__awsh_rc
@@ -350,6 +360,16 @@ export function selfTest(): string[] {
   const ps = pwshSnippet();
   if (!ps.includes('GetNewClosure')) {
     failures.push('pwsh snippet lost GetNewClosure — args would arrive empty');
+  }
+  if (!/Get-Command awsh[^\n]*\n\s*Select-Object -First 1/.test(ps)) {
+    failures.push('pwsh snippet lost Select-Object -First 1 — two awsh shims on PATH ' +
+                  'make $exe.Source two paths and every invocation fails');
+  }
+  if (!ps.includes('AWSH_OMNIBOX_SESSION = "$PID"')) {
+    failures.push('pwsh snippet lost the per-terminal session id — every line becomes a cold one-shot');
+  }
+  if (!posixSnippet('bash').includes('AWSH_OMNIBOX_SESSION="$$"')) {
+    failures.push('posix snippet lost the per-terminal session id');
   }
   if (!ps.includes('CommandOrigin')) {
     failures.push('pwsh snippet lost the CommandOrigin guard — every Get-Command ' +

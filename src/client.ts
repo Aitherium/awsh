@@ -13,7 +13,35 @@
  */
 
 import type { BackendType, ProviderOverride } from './config.js';
-import { getActiveConfig, applyCloudFallback, DEFAULT_AGENT } from './config.js';
+import { getActiveConfig, applyCloudFallback, DEFAULT_AGENT} from './config.js';
+import { ThinkFilter } from './think-filter.js';
+import { buildSituation } from './situation.js';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { homedir } from 'node:os';
+
+/**
+ * The platform's session credential for THIS machine.
+ *
+ * Measured 2026-08-21: the shell held a 17-character token in ~/.aither/auth.json
+ * that the gateway answered 401 to, so every turn ended with "Cloud gateway
+ * requires sign-in - run /login" while the header still showed the cached user
+ * as signed in. A valid bearer was sitting in the SAME directory the whole time,
+ * minted by the platform's own device-flow tool, answering 200 to the exact
+ * request that had just been refused. Nothing in this CLI knew the file existed.
+ *
+ * So a 401 here is not evidence that the user must log in. It is evidence that
+ * the token WE chose was rejected -- a different claim -- and telling someone to
+ * authenticate when they already are is the worst possible version of it.
+ */
+function sessionBearer(): string | null {
+  try {
+    const value = readFileSync(join(homedir(), '.aither', 'session-bearer'), 'utf-8').trim();
+    return value || null;
+  } catch {
+    return null;
+  }
+}
 
 export interface SSEEvent {
   type: string;
@@ -49,6 +77,13 @@ export interface StreamChatOpts {
   attachments?: string[];
   /** Max effort cap (prevents agentic upgrade at 7+). undefined = uncapped. */
   maxEffort?: number;
+  /** Extra SYSTEM content for this turn (a pack prompt, the shell's live
+   *  situation block). Appended AFTER the backend's own system prompt so the
+   *  stable prefix stays cacheable. */
+  systemAdditions?: string[];
+  /** Set true to send this turn WITHOUT the shell situation block (tests,
+   *  or a caller that already supplied its own). Default: attached. */
+  noSituation?: boolean;
   /** Explicit LLM role for provider selection: orchestrator (fast/cheap),
    *  reasoning (slow/expensive), perception (vision/multimodal). When set,
    *  uses the role-specific provider config if available. */
@@ -259,9 +294,68 @@ export class GenesisClient {
     // edge gateway). The ADK daemon falls through to /chat/stream below.
     if (mode === 'auto' && backend.type === 'adk' && !backend.hasAgentStream) { yield* this._streamOpenAI(message, opts); return; }
 
+    // UNKNOWN BACKEND -> the STANDARD route, never the proprietary one.
+    //
+    // detectBackend() gives up after a 5s /health timeout and returns
+    // {type:'unknown', name:'offline'}. Falling through from there lands on
+    // /chat/stream, which only genesis and the ADK daemon serve -- so against
+    // the gateway the request HANGS until the socket closes, and the shell
+    // reports "stream ended before completion - the connection closed
+    // mid-turn". Measured 2026-08-21: /chat/stream on the local gateway
+    // returned 000 after 35s while /v1/chat/completions answered in ~1s, and
+    // that is why the interactive shell could not finish a turn while one-shot
+    // mode (which takes the OpenAI path) worked all along.
+    //
+    // A failed health probe is not evidence of a genesis pipeline. It is no
+    // evidence at all, and the honest default for no evidence is the shape
+    // every OpenAI-compatible endpoint serves -- including genesis itself,
+    // which also exposes /v1. Guessing the proprietary route can only pay off
+    // when the guess is right and hangs the turn when it is wrong.
+    if (mode === 'auto' && backend.type === 'unknown') { yield* this._streamOpenAI(message, opts); return; }
+
+    // A LOADED PACK MUST REACH THIS PATH TOO.
+    //
+    // The raw OpenAI path injects the pack's system_prompt as its first system
+    // message. This one has no such concept -- it carries `persona` as a field
+    // -- and until 2026-08-21 the pack reached NEITHER here. Measured against
+    // the real config on the owner's machine (backendType unknown, mode auto,
+    // no llmUrl), `awsh gobbonet` printed the GobboNet banner and then sent
+    //
+    //     {"message":"hi","persona":"aither",...}
+    //
+    // so the pack changed nothing at all on the path actually in use, and the
+    // banner was decorative. The launch-time refusal in packs.ts ("a shell that
+    // says it loaded a persona and did not is worse than one that refuses")
+    // was being honoured on one path out of two.
+    //
+    // The field is `system_additions`, a LIST, and that is not cosmetic: the
+    // first version of this fix sent `system_prompt`, which reads perfectly at
+    // the call site and which genesis DROPS -- chat.py pops a fixed set of keys
+    // off a raw dict and `system_prompt` is not among them. It would have been
+    // wired, shipped, and inert, with the request body looking exactly right in
+    // every log. `system_additions` is what the router actually appends to the
+    // LLM's system content (it does `body["system_additions"].append(...)`, so
+    // a list is also the shape it expects to find).
+    //
+    // The identity goes separately as `persona` because the two answer
+    // different questions: the identity selects a configured agent server-side,
+    // the prompt is the pack's own opinions, and a pack may carry either or
+    // both. An explicit @mention still beats the pack -- asking demiurge
+    // something inside a gobbonet shell should reach demiurge.
+    const _packCfg = getActiveConfig();
+    // Every turn carries the shell's live situation (clock, cwd, shell, host) as
+    // a system addition — see situation.ts for why a shell must never make the
+    // agent guess the time. Pack prompt first (identity), situation LAST (it
+    // changes every turn; a moving prefix would bust the backend's prompt cache).
+    const _additions = [
+      ...(_packCfg?.packPrompt ? [_packCfg.packPrompt] : []),
+      ...(opts.systemAdditions || []),
+      ...(opts.noSituation ? [] : [buildSituation()].filter((x): x is string => !!x)),
+    ];
     const body = {
       message,
-      persona: opts.agent || 'aither',
+      persona: opts.agent || _packCfg?.packIdentity || 'aither',
+      ...(_additions.length ? { system_additions: _additions } : {}),
       ...(opts.mentions && opts.mentions.length > 1 ? { mentions: opts.mentions } : {}),
       session_id: opts.sessionId,
       ...(opts.model ? { model: opts.model } : {}),
@@ -861,8 +955,21 @@ export class GenesisClient {
     optionalRoleProvider?: ProviderOverride,
   ): AsyncGenerator<SSEEvent> {
     const messages: Array<{ role: string; content: string }> = [];
+    // A loaded pack is the FIRST system message. The genesis path carries persona
+    // as a field; this bare OpenAI path has no such concept, so without this the
+    // pack would change nothing here and `awsh gobbonet` would be a banner over
+    // an unchanged assistant.
+    const packPrompt = getActiveConfig()?.packPrompt;
+    if (packPrompt) messages.push({ role: 'system', content: packPrompt });
     if (opts.sessionContext?.summary) {
       messages.push({ role: 'system', content: `Conversation so far:\n${opts.sessionContext.summary}` });
+    }
+    for (const add of (opts.systemAdditions || [])) messages.push({ role: 'system', content: add });
+    // The shell's live situation block (clock, cwd, shell, host) — same rule as
+    // the genesis path: last, so the stable prefix stays cacheable.
+    if (!opts.noSituation) {
+      const sit = buildSituation();
+      if (sit) messages.push({ role: 'system', content: sit });
     }
     messages.push({ role: 'user', content: message });
 
@@ -871,7 +978,14 @@ export class GenesisClient {
     // Per-role providers (e.g., reasoning → DeepSeek R1) come second; default config last.
     const provider = optionalRoleProvider || getActiveConfig()?.provider;
     const model = provider?.model
-      || opts.model || this._backend?.agent || this._backend?.name || DEFAULT_AGENT;
+      || opts.model || this._backend?.agent
+      // NOT `name` when detection failed: detectBackend() returns the SENTINEL
+      // {type:'unknown', name:'offline'} after a health timeout, and using that
+      // as a model id sends `"model":"offline"` -- a name no backend serves, so
+      // a turn that was one step from working 400s instead. A sentinel is the
+      // absence of an answer, not an answer.
+      || (this._backend && this._backend.type !== 'unknown' ? this._backend.name : undefined)
+      || DEFAULT_AGENT;
     const body = { model, messages, stream: true };
 
     // Prefer the provider's endpoint, then the configured raw-inference endpoint
@@ -908,10 +1022,92 @@ export class GenesisClient {
             `Set an API key: \x1b[36mexport DEEPSEEK_API_KEY=…\x1b[0m (or AITHER_DEEPSEEK_API_KEY), then retry.`,
           );
         }
+        // Before claiming the user is signed out, try the credential the
+        // PLATFORM minted for this machine. Once only, and only when it differs
+        // from what was just refused -- retrying the same token would be a
+        // second identical 401 dressed up as resilience.
+        const fallbackToken = sessionBearer();
+        if (fallbackToken && fallbackToken !== this._authToken) {
+          this._authToken = fallbackToken;
+          const retry = await fetch(completionsUrl, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'X-Caller-Type': 'PLATFORM',
+              ...this.authHeaders(),
+            },
+            body: JSON.stringify(body),
+            signal: opts.signal,
+          });
+          if (retry.ok) {
+            yield { type: 'session_start', data: { type: 'session_start', agent: this._backend?.agent || opts.agent || 'agent', model } };
+            yield* this._readOpenAISSE(retry, model);
+            return;
+          }
+        }
         throw new Error(
           `Cloud gateway requires sign-in — run \x1b[36m/login\x1b[0m to authenticate, ` +
           `or start local AitherOS to use the free local backend.`,
         );
+      }
+      // ── 5xx on a STREAMING request → retry ONCE without `stream` ──────────
+      //
+      // Measured 2026-08-20 against BOTH mcp.aitherium.com and the local gateway
+      // :8182, byte-identical bodies apart from one key:
+      //
+      //     {"model":"<default-agent>","messages":[...]}                -> 200
+      //     {"model":"<default-agent>","messages":[...],"stream":true}  -> 500
+      //
+      // So the gateway's SSE path is broken while its non-streaming path is
+      // fine. That took out EVERY one-shot the shell makes — `awsh "question"`,
+      // the omnibox, and any script piping through it — and it presented as a
+      // bare "Inference failed: HTTP 500", which reads as the model being down
+      // rather than as a transport fault the client can route around.
+      //
+      // This is a CLIENT-SIDE workaround for a SERVER-SIDE bug, deliberately
+      // narrow: only 5xx, only when we asked for a stream, only one retry, and
+      // it does not swallow the failure if the retry also fails. The answer
+      // arrives in one chunk rather than token-by-token, which is a visible
+      // degradation and the right trade against not answering at all. Remove it
+      // when the gateway serves SSE again — and note the 200-vs-500 probe above
+      // is how to tell, since nothing else reports this.
+      if (response.status >= 500 && body.stream) {
+        const started = Date.now();
+        const retry = await fetch(completionsUrl, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({ ...body, stream: false }),
+          signal: opts.signal,
+        }).catch(() => null);
+        if (retry?.ok) {
+          const json: any = await retry.json().catch(() => null);
+          const content = json?.choices?.[0]?.message?.content;
+          if (content) {
+            // Reasoning models emit <think>…</think> INLINE in the message. The
+            // streaming path never showed it (it arrives as typed `thinking`
+            // events the renderer handles separately), so leaving it here would
+            // make the fallback dump a wall of chain-of-thought where the stream
+            // showed a sentence — worst on the omnibox, where the whole point is
+            // that one typed word gets one short answer.
+            //
+            // The guard matters more than the strip: a model that emits ONLY
+            // reasoning would otherwise be turned into silence, which reads as
+            // "it didn't answer" rather than "it answered oddly". Never trade a
+            // messy answer for no answer.
+            const raw = String(content);
+            const stripped = raw.replace(/<think(?:ing)?>[\s\S]*?<\/think(?:ing)?>/gi, '').trim();
+            yield {
+              type: 'session_start',
+              data: { type: 'session_start', agent: this._backend?.agent || opts.agent || 'agent', model },
+            };
+            yield { type: 'token', data: { type: 'token', t: stripped || raw } };
+            yield {
+              type: 'complete',
+              data: { type: 'complete', model, duration_ms: Date.now() - started, eager: false },
+            };
+            return;
+          }
+        }
       }
       throw new Error(`Inference failed: HTTP ${response.status} ${text.slice(0, 200)}`);
     }
@@ -939,6 +1135,7 @@ export class GenesisClient {
     const reader = stream.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
+    const think = new ThinkFilter();
     const started = Date.now();
     try {
       while (true) {
@@ -957,13 +1154,20 @@ export class GenesisClient {
             const json = JSON.parse(payload);
             const choice = json.choices?.[0];
             const delta = choice?.delta?.content ?? choice?.message?.content;
-            if (delta) yield { type: 'token', data: { type: 'token', t: delta } };
+            if (delta) {
+              // Tag-aware and chunk-safe; see src/think-filter.ts for why this
+              // cannot be a per-chunk regex.
+              const safe = think.push(String(delta));
+              if (safe) yield { type: 'token', data: { type: 'token', t: safe } };
+            }
           } catch { /* skip keep-alives / non-JSON */ }
         }
       }
     } finally {
       reader.releaseLock();
     }
+    const tail = think.flush();
+    if (tail) yield { type: 'token', data: { type: 'token', t: tail } };
     yield { type: 'complete', data: { type: 'complete', model, duration_ms: Date.now() - started, eager: false } };
   }
 }

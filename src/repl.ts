@@ -35,6 +35,7 @@ import {
   type Job,
 } from './jobs.js';
 import { configureRemoteSync, recordTurn, loadSession, buildContextSummary } from './session-store.js';
+import { personaSpeaking, personaIdle } from './persona-bridge.js';
 import { setCurrentCommand, withCrashReporting } from './crash-reporter.js';
 import { askHidden, isSecretBearing, redactForHistory } from './secret-input.js';
 
@@ -86,7 +87,7 @@ function saveConfigKey(key: string, value: string): void {
     if (!found) lines.push(`${key}: ${value}`);
     // Trim trailing empty lines
     while (lines.length > 0 && !lines[lines.length - 1].trim()) lines.pop();
-    writeFileSync(configFile, lines.join('\n') + '\n', 'utf-8');
+    let out = lines.join("\n");
   } catch (err) {
     console.log(chalk.yellow('  Failed to save config:'), err instanceof Error ? err.message : String(err));
   }
@@ -267,6 +268,35 @@ export async function startRepl(client: GenesisClient, config: ShellConfig): Pro
 
   /** Last session profile for RLM context injection across turns. */
   let lastSessionProfile: SessionProfile | null = null;
+
+  /** The actual conversation, for continuity across turns.
+   *
+   * lastSessionProfile IS assigned each turn -- but the summary built from
+   * so prevCtx was always undefined and every turn reached the model with no
+   * context -- "how do you know that?" had nothing to resolve "that"
+   * against. And the summary it would have built is telemetry ("N tools, N
+   * errors"), not conversation: it never contained what the assistant SAID,
+   * which is the only part a follow-up question refers to.
+   *
+   * Bounded on purpose. Unbounded history on a bare completions path grows
+   * the prompt every turn until it is rejected or expensive, and that
+   * failure arrives as a mysterious mid-conversation error rather than as
+   * anything recognisably about history. */
+  const _turnHistory: { user: string; assistant: string }[] = [];
+  const HISTORY_TURNS = 6;
+  const HISTORY_CHARS = 4000;
+
+  function historySummary(): string | null {
+    if (!_turnHistory.length) return null;
+    const lines: string[] = [];
+    for (const turn of _turnHistory.slice(-HISTORY_TURNS)) {
+      lines.push(`User: ${turn.user}`);
+      if (turn.assistant) lines.push(`Assistant: ${turn.assistant}`);
+    }
+    let out = lines.join("\n");
+    if (out.length > HISTORY_CHARS) out = out.slice(-HISTORY_CHARS);
+    return out;
+  }
 
   /** Seeded conversation summary when launched with --continue/--resume. */
   let seededContext: string | null = null;
@@ -485,6 +515,32 @@ export async function startRepl(client: GenesisClient, config: ShellConfig): Pro
       // e.g. typed "nb list" — selected="nb", trailing args="list"
       const pickerParts = (lastSearchInput || '').trim().split(/\s+/);
       const trailingArgs = pickerParts.length > 1 ? pickerParts.slice(1).join(' ') : '';
+
+      // D-2171 defensive guard: @inquirer/search's Enter handler resolves
+      // against `searchResults[active]`, populated by an UNDEBOUNCED async
+      // source() call fired on every keystroke (search/dist/index.js:58-91,
+      // 94-138) — nothing guarantees the render Enter fires against matches
+      // the term actually typed by then. Confirmed live 2026-08-24: typing
+      // "/persona start" ran "/soul" instead. Recompute the same filter
+      // this picker used; if the returned selection isn't something that
+      // term would actually match, it's a stale render — refuse it rather
+      // than silently execute the wrong command.
+      const guardTerm = pickerParts[0]?.toLowerCase() || '';
+      if (guardTerm) {
+        const chosen = cmdChoices.find((c: any) => c.type !== 'separator' && c.value === selected);
+        const stillMatches = chosen && (
+          String(chosen.value).includes(guardTerm) ||
+          String(chosen.name || '').toLowerCase().includes(guardTerm) ||
+          String(chosen.description || '').toLowerCase().includes(guardTerm)
+        );
+        if (!stillMatches) {
+          console.log(chalk.yellow(
+            `  Picker returned "/${selected}" but you typed "${lastSearchInput}" — that's a stale selection, not what you asked for. Not running it; try again.`,
+          ));
+          refreshPrompt();
+          return;
+        }
+      }
 
       if (trailingArgs) {
         // User typed command + args in picker — execute immediately
@@ -1244,7 +1300,16 @@ export async function startRepl(client: GenesisClient, config: ShellConfig): Pro
     const renderer = createStreamRenderer(config.sessionId, message, _useSteerBar ? steeringBar : undefined);
 
     // Build session context from previous turn for RLM continuity
-    const prevCtx = lastSessionProfile ? {
+    // Real conversation first. The profile branch below is kept because it
+    // carries tool/error telemetry a backend may use, but it is not what a
+    // follow-up question needs.
+    const _hist = historySummary();
+    const prevCtx = _hist ? {
+      summary: _hist,
+      tools_used: lastSessionProfile?.tool_calls.map(t => t.name) ?? [],
+      model: lastSessionProfile?.model ?? (config.model || ''),
+      errors: lastSessionProfile?.errors ?? [],
+    } : lastSessionProfile ? {
       summary: `Previous prompt: "${lastSessionProfile.prompt.slice(0, 200)}" → ${lastSessionProfile.model}, ${lastSessionProfile.tool_calls.length} tools, ${lastSessionProfile.errors.length} errors`,
       tools_used: lastSessionProfile.tool_calls.map(t => t.name),
       model: lastSessionProfile.model,
@@ -1268,6 +1333,12 @@ export async function startRepl(client: GenesisClient, config: ShellConfig): Pro
     }
 
     try {
+      // Only repl-tui.ts drove the Persona desktop overlay before this — the
+      // plain `awsh` REPL had no wiring at all, so talking to Aither here
+      // never moved the avatar. personaSpeaking()/personaIdle() are
+      // fire-and-forget with their own dead-endpoint cooldown (persona-bridge.ts),
+      // so this is a no-op when Persona isn't running.
+      personaSpeaking();
       const stream = client.streamChat(message, {
         agent,
         mentions: resolvedAgents.length > 1 ? resolvedAgents : undefined,
@@ -1386,6 +1457,7 @@ export async function startRepl(client: GenesisClient, config: ShellConfig): Pro
         }
       }
     } finally {
+      personaIdle();
       steeringBar.deactivate();
       if (process.stdin.isTTY) refreshPrompt();  // restore the green prompt
       renderer.finish();
@@ -1400,6 +1472,14 @@ export async function startRepl(client: GenesisClient, config: ShellConfig): Pro
         recordTurn(config.sessionId, lastSessionProfile.agent || 'aither', lastSessionProfile.prompt, renderer.getContent(), {
           model: lastSessionProfile.model, tools: lastSessionProfile.tool_calls.map(t => t.name), tokens: _toks,
         });
+      } catch { /* */ }
+      // The same two strings recordTurn() already persists, kept in memory so
+      // the NEXT turn can refer to this one. Without it the model is handed
+      // telemetry about the last turn and none of its content.
+      try {
+        const _a = renderer.getContent();
+        if (message) _turnHistory.push({ user: message, assistant: _a || '' });
+        while (_turnHistory.length > HISTORY_TURNS) _turnHistory.shift();
       } catch { /* */ }
       activeAbort = null;
       if (!closed) restoreReadline();

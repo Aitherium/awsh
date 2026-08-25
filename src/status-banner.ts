@@ -28,6 +28,10 @@ export interface WelcomeParams {
   host: string;
   user?: string;
   resumedMsg?: string;
+  /** Active brain pack, if one was launched (`awsh <pack>`). */
+  pack?: string;
+  /** Human title from the pack manifest, when it carries one. */
+  packTitle?: string;
 }
 
 /** The boot header: a letter-spaced gradient wordmark, a thin rule, and ONE compact
@@ -41,12 +45,24 @@ export function formatWelcomeHeader(p: WelcomeParams): string[] {
     p.user ? chalk.dim(p.user) : null,
     chalk.dim('? keys'),
   ].filter(Boolean).join(chalk.dim('  ·  '));
+  // The wordmark is the PACK when one is loaded. `awsh gobbonet` used to print
+  // the pack banner once and then open a shell branded AITHERSHELL with nothing
+  // naming the pack anywhere -- so the alt-shell it had just entered was
+  // indistinguishable from the ordinary one, and the reasonable read was that
+  // the launch had not worked. The product name stays, as the subtitle.
+  const spaced = (s: string) => s.toUpperCase().split('').join(' ');
+  const title = p.packTitle || p.pack;
+  const mark = title ? spaced(title) : spaced('awsh');
   const lines = [
     '',
-    '  ' + chalk.dim('⟪ ') + gradient('A I T H E R S H E L L') + chalk.dim(' ⟫'),
+    '  ' + chalk.dim('⟪ ') + gradient(mark) + chalk.dim(' ⟫'),
     '  ' + rule,
     '  ' + sub,
   ];
+  if (p.pack) {
+    lines.splice(3, 0, '  ' + chalk.magenta('◈') + ' ' + chalk.dim('pack ') + p.pack
+                       + chalk.dim('  ·  awsh'));
+  }
   if (p.resumedMsg) lines.push('  ' + chalk.green(p.resumedMsg));
   return lines;
 }

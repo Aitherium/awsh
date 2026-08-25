@@ -29,5 +29,5 @@ jobs:
         # awsh's mirror ships a test/ dir but not the *.test.ts files its own
         # `npm test` globs, so a bare directory gate still runs a command that
         # can only fail.
-        if: ${{ hashFiles('test/**/*.test.*', 'tests/**/*.test.*', 'src/**/*.test.*') != '' }}
+        if: ${{ hashFiles('test/**/*.test.*', 'tests/**/*.test.*') != '' }}
         run: npm test

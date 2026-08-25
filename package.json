@@ -6,8 +6,7 @@
   "type": "module",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Aitherium/AitherOS.git",
-    "directory": ".PRODUCTS/.AITHERSHELL/cli"
+    "url": "git+https://github.com/Aitherium/awsh.git"
   },
   "bin": {
     "awsh": "dist/main.js",

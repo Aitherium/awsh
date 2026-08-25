@@ -11,7 +11,7 @@ import { execSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import chalk from 'chalk';
-import ora from 'ora';
+import ora from './spinner.js';
 import type { GenesisClient } from './client.js';
 import type { ShellConfig } from './config.js';
 import type { CommandHandler } from './commands.js';

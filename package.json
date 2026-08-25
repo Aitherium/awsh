@@ -1,6 +1,6 @@
 {
   "name": "@aitherium/awsh",
-  "version": "1.18.5",
+  "version": "1.18.6",
   "description": "awsh - your terminal answers you. Type a question where a command would go, and get an answer instead of \"command not found\".",
   "license": "BUSL-1.1",
   "type": "module",
@@ -24,7 +24,7 @@
     "dev": "tsx src/main.ts",
     "sync-version": "node scripts/sync-version.mjs",
     "version:check": "node scripts/sync-version.mjs --check",
-    "build": "node scripts/sync-version.mjs --check && tsc",
+    "build": "node scripts/sync-version.mjs --check && node scripts/check-spinner-import.mjs && tsc",
     "build:standalone": "bun build --compile src/main.ts --outfile dist/aither-shell",
     "start": "node dist/main.js",
     "test": "node --import tsx --test \"test/**/*.test.ts\"",

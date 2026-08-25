@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { createInterface } from 'node:readline';
 import { homedir } from 'node:os';
 import chalk from 'chalk';
-import ora from 'ora';
+import ora from './spinner.js';
 import type { GenesisClient } from './client.js';
 import type { ShellConfig } from './config.js';
 import { getActiveConfig, DEFAULT_AGENT } from './config.js';
@@ -8445,13 +8445,24 @@ COMMANDS['persona'] = {
           windowsHide: true,
         }).unref();
 
-        // Wait briefly and check if it started
-        await new Promise(r => setTimeout(r, 1500));
-        const nowHealthy = await personaHealthy();
+        // POLL, don't peek once. Persona is an Electron app cold-loading a VRM
+        // model; measured 2026-08-24 it binds :47831 well after the old fixed
+        // 1.5s wait, so this path warned "health check failed" on every cold
+        // start that actually succeeded — and the user's next /persona worked,
+        // making the warning read as flaky rather than as impatient.
+        const deadline = Date.now() + 30_000;
+        let nowHealthy = false;
+        while (Date.now() < deadline) {
+          await new Promise(r => setTimeout(r, 1000));
+          nowHealthy = await personaHealthy();
+          if (nowHealthy) break;
+          const waited = Math.round((Date.now() - (deadline - 30_000)) / 1000);
+          spinner.text = `Starting Persona... (${waited}s)`;
+        }
         if (nowHealthy) {
-          spinner.succeed('Persona started successfully');
+          spinner.succeed('Persona started');
         } else {
-          spinner.warn('Persona process started, but health check failed (still loading?)');
+          spinner.warn('Persona did not answer /health within 30s — check D:\\persona\\electron-launch.log');
         }
       } catch (err: any) {
         spinner.fail('Failed to start Persona');

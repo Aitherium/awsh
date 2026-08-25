@@ -16,7 +16,7 @@
  */
 
 import chalk from 'chalk';
-import ora from 'ora';
+import ora from './spinner.js';
 import { createInterface } from 'node:readline';
 import type { GenesisClient } from './client.js';
 import type { ShellConfig } from './config.js';

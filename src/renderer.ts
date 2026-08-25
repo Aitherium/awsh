@@ -3,7 +3,7 @@
  */
 
 import chalk from 'chalk';
-import ora, { type Ora } from 'ora';
+import ora, { type Ora } from './spinner.js';
 import { marked } from 'marked';
 import { markedTerminal } from 'marked-terminal';
 import { writeFileSync, mkdirSync, existsSync } from 'fs';

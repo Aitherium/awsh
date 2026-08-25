@@ -1,0 +1,117 @@
+# Build and release awsh standalone binaries ON FREE HOSTED RUNNERS.
+#
+# The monorepo's shell-release lane declared macOS "optional: there is no macOS
+# runner here" -- on this public repo macos-latest is free, so the macOS binary
+# stops being a dropped product artifact. Linux and Windows move off the paid
+# self-hosted pool for the same $0. The release lands in THIS repo, so the
+# job's own GITHUB_TOKEN publishes it -- no cross-repo PAT.
+
+name: Release binaries
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Build everything, publish nothing'
+        type: boolean
+        default: false
+  push:
+    branches: [main]
+    paths: ['package.json']
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-binaries
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      exists: ${{ steps.v.outputs.exists }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          V="$(node -p "require('./package.json').version")"
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          if gh release view "v$V" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "v$V already released -- nothing to do"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    needs: prepare
+    if: needs.prepare.outputs.exists == 'false'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: bun-linux-x64
+            artifact: aither-shell-linux-x64
+          - os: windows-latest
+            target: bun-windows-x64
+            artifact: aither-shell-win64.exe
+          - os: macos-latest
+            target: bun-darwin-arm64
+            artifact: aither-shell-macos-arm64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: bun install
+      - name: Build binary
+        run: bun build --compile --target=${{ matrix.target }} src/main.ts --outfile ${{ matrix.artifact }}
+      - name: The binary must actually run
+        # --version, because a compile that produces a file proves only that a
+        # file was produced. Windows needs the .exe invoked via its real name.
+        shell: bash
+        run: ./${{ matrix.artifact }} --version
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}
+
+  release:
+    needs: [prepare, build]
+    if: needs.prepare.outputs.exists == 'false' && !inputs.dry_run
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums + release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cd dist
+          ls -lh
+          sha256sum * > SHA256SUMS
+          V="${{ needs.prepare.outputs.version }}"
+          gh release create "v$V" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "awsh v$V" \
+            --notes "Standalone binaries built by CI on GitHub-hosted runners (linux-x64, win64, macos-arm64). Verify against SHA256SUMS. Also on npm: \`npm i -g @aitherium/awsh\`." \
+            *
+      - name: The release must actually carry the binaries
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          V="${{ needs.prepare.outputs.version }}"
+          N="$(gh release view "v$V" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets | length')"
+          echo "v$V carries $N asset(s)"
+          [ "${N:-0}" -ge 4 ] || { echo "::error::v$V is missing binaries (want 3 + SHA256SUMS)"; exit 1; }

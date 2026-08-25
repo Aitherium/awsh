@@ -158,6 +158,14 @@ jobs:
             # the blank entry before publishing is what actually lets npm fall
             # through to its own OIDC trusted-publishing detection.
             npm config delete //registry.npmjs.org/:_authToken 2>/dev/null || true
+            echo "::group::OIDC diagnostics"
+            npm -v
+            echo "userconfig path: ${NPM_CONFIG_USERCONFIG:-<unset, default ~/.npmrc>}"
+            npm config get //registry.npmjs.org/:_authToken 2>&1 || true
+            npm config list 2>&1 || true
+            echo "ACTIONS_ID_TOKEN_REQUEST_URL set: $([ -n "$ACTIONS_ID_TOKEN_REQUEST_URL" ] && echo yes || echo no)"
+            echo "ACTIONS_ID_TOKEN_REQUEST_TOKEN set: $([ -n "$ACTIONS_ID_TOKEN_REQUEST_TOKEN" ] && echo yes || echo no)"
+            echo "::endgroup::"
             npm publish --provenance --access public
           fi
 

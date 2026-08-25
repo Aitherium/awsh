@@ -1,9 +1,13 @@
 {
-  "name": "@aitherium/shell-cli",
+  "name": "shell-cli",
   "version": "1.18.0",
-  "description": "Renamed to awsh. This package installs awsh for you.",
+  "description": "Renamed to awsh. This package installs awsh for you. NOT the same package as @aitherium/shell-cli, which is a separate, actively-maintained product -- do not restore that name here.",
   "license": "BUSL-1.1",
   "homepage": "https://aitherium.github.io/awsh/",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Aitherium/awsh.git"
+  },
   "dependencies": {
     "awsh": "1.18.0"
   }

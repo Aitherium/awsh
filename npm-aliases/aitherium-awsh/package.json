@@ -1,13 +1,13 @@
 {
-  "name": "@aitherium/awsh",
-  "version": "1.18.4",
-  "description": "Scoped alias for `awsh`. Both names install the same shell; `awsh` is canonical.",
+  "name": "aitherium-awsh",
+  "version": "1.18.0",
+  "description": "Unscoped alias for `awsh`. Both names install the same shell; `@aitherium/awsh` is canonical.",
   "license": "BUSL-1.1",
   "dependencies": {
     "awsh": "1.18.0"
   },
   "bin": {
-    "awsh": "bin/awsh.js"
+    "awsh": "./bin/awsh.js"
   },
   "files": [
     "bin/**/*.js",
@@ -16,7 +16,6 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Aitherium/AitherOS.git",
-    "directory": ".PRODUCTS/.AITHERSHELL/cli"
+    "url": "git+https://github.com/Aitherium/awsh.git"
   }
 }

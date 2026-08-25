@@ -797,6 +797,14 @@ $rows | ForEach-Object { [Console]::Out.WriteLine("PATH=" + $_) }`;
     return;
   }
 
+  // `aither awrun …` — same interception reason as `harness` above: it rides
+  // the same daemon and must not wait on chat-backend resolution.
+  if (args[0] && args[0].toLowerCase() === 'awrun') {
+    const { runAwrunCommand } = await import('./awrun-client.js');
+    process.exitCode = await runAwrunCommand(args.slice(1));
+    return;
+  }
+
   // `aither room` — the AitherAeon six-pillar view. Intercepted here for the same
   // reason as `harness`: the room lives on the harness daemon, which is a host
   // process that answers when Genesis and the whole container fleet do not. Making

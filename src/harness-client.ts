@@ -19,7 +19,13 @@ import { join } from 'node:path';
 
 const DEFAULT_URL = 'http://127.0.0.1:8362';
 
-function daemonUrl(): string {
+// daemonUrl/daemonToken/api are exported so sibling daemon-client modules
+// (awrun-client.ts and any future one) reuse the SAME auth resolution and
+// error-shaping instead of a second copy that can drift — same lesson as
+// the shared browser-inference worker in this repo, where a comment asking
+// people to "keep them in step" did not stop the drift; only one copy does.
+
+export function daemonUrl(): string {
   return (process.env.AITHER_HARNESS_URL || DEFAULT_URL).replace(/\/$/, '');
 }
 
@@ -28,7 +34,7 @@ function daemonUrl(): string {
  * writes at first start. Returning '' rather than throwing lets the caller
  * emit one clear "start the daemon" message instead of a stack trace.
  */
-function daemonToken(): string {
+export function daemonToken(): string {
   const fromEnv = (process.env.AITHER_HARNESS_TOKEN || '').trim();
   if (fromEnv) return fromEnv;
   try {
@@ -38,7 +44,7 @@ function daemonToken(): string {
   }
 }
 
-async function api<T>(path: string, init?: RequestInit): Promise<T> {
+export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const token = daemonToken();
   if (!token) {
     throw new Error(

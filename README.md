@@ -14,7 +14,7 @@ everything needed to answer you was right there on the machine.
 `awsh` is a terminal where that line is a question instead of a mistake.
 
 ```bash
-npm i -g awsh
+npm i -g @aitherium/shell-cli
 awsh
 ```
 
@@ -89,5 +89,5 @@ actually read). None of them are required.
 Apache-2.0 like most of the family, and the family list will keep saying so
 rather than letting you find out at adoption time.
 
-The published artifact is the binary: `npm i -g awsh`. `@aitherium/shell-cli` is
-the old name and still works — it installs `awsh` for you.
+The published artifact is `@aitherium/shell-cli` — it installs the `awsh`
+binary. `@aitherium/awsh` also exists; the bare name `awsh` is a 404.

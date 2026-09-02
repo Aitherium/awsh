@@ -7285,6 +7285,19 @@ COMMANDS['storage'] = {
   },
 };
 
+// `/claude <task…>` — hand a task to a scoped Claude Code subagent through the adk
+// runner. Same shape as `/storage` above: the parsing and the shell-out live in
+// claude-command.ts (shared with `aither claude …` in main.ts and with
+// test/claude-args.test.ts); this builtin only tokenizes the REPL's raw string.
+COMMANDS['claude'] = {
+  description: 'Hand a task to a scoped Claude Code subagent (adk runner)',
+  usage: '/claude [--allow Read,Grep] [--budget 0.25] [--timeout 300] [--goal <id>] <task…>',
+  handler: async (_client: GenesisClient, args: string) => {
+    const { runClaudeCommand } = await import('./claude-command.js');
+    await runClaudeCommand(parseQuotedArgs(args.trim()));
+  },
+};
+
 /* ═══════════════════════════════════════════════════════════════════════════════
  * AUTONOMOUS AGENT COMMANDS — Calendar, Mail, Will, Escalate, Research, Publish
  * ═══════════════════════════════════════════════════════════════════════════════ */

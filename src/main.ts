@@ -182,7 +182,7 @@ async function main() {
   // never reach a subcommand's own help — the flag was swallowed before dispatch. Subcommands
   // that print their own usage opt in here; everything else keeps the old behaviour exactly,
   // so this cannot regress a command that has no help of its own.
-  const HELP_AWARE = new Set(['bonsai', 'storage']);
+  const HELP_AWARE = new Set(['bonsai', 'storage', 'claude']);
   if ((args.includes('--help') || args.includes('-h')) && !HELP_AWARE.has((args[0] || '').toLowerCase())) {
     printUsage();
     return;
@@ -847,6 +847,18 @@ $rows | ForEach-Object { [Console]::Out.WriteLine("PATH=" + $_) }`;
     return;
   }
 
+  // `aither claude <task…>` — hand a scoped task to a Claude Code subagent via the adk
+  // runner daemon. Like `harness`, `room` and `well`, this is intercepted before backend
+  // resolution: the runner (adk claude serve, :8360) is a HOST process and needs no chat
+  // backend, so waiting on Genesis would make the handoff fail exactly when the fleet is
+  // the thing being repaired. It shells out to `python -m adk.cli claude spawn` and
+  // exits with the child's code — see claude-command.ts.
+  if (args[0] && args[0].toLowerCase() === 'claude') {
+    const { runClaudeCommand } = await import('./claude-command.js');
+    process.exitCode = await runClaudeCommand(args.slice(1));
+    return;
+  }
+
   // `aither decisions …` and `aither decide …` — the decision-card surface for the CLI.
   // Like `harness` and `room`, this is intercepted before backend resolution because
   // the daemon is a host process that survives when Genesis does not, so this must
@@ -1455,6 +1467,8 @@ ${chalk.bold('TUI:')}
 
 ${chalk.bold('Quick actions:')}
   aither storage nodes             Storage inventory: nodes, drives, freshness
+  aither claude "<task>"          Hand a task to a scoped Claude Code subagent
+                                  [--allow Read,Grep] [--budget 0.25] [--timeout 300] [--goal <id>]
   aither -c gaming                Toggle gaming mode (free VRAM for games)
   aither -c "gaming on"           Activate gaming mode
   aither -c apps                  Show all AitherOS app statuses

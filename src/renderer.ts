@@ -579,6 +579,15 @@ function wrapBareCode(text: string): string {
 
 export interface StreamRenderer {
   onEvent(event: SSEEvent): void;
+  /** Start the spinner BEFORE the first SSE event arrives.
+   *
+   *  Every startSpinner() call site lives inside onEvent(), and the earliest
+   *  fires on `session_start` -- so the window between the user pressing Enter
+   *  and the first byte off the wire had NO indication of any kind. Measured
+   *  2026-09-02: a cloud-routed turn ran 133.4s and the user reported it as a
+   *  hang. Local is 0.24s, but time-to-first-byte is a property of whichever
+   *  backend answered, so it is unbounded and must not be left uncovered. */
+  begin(text?: string): void;
   getContent(): string;
   /** End-of-turn cleanup. `aborted` = the user interrupted (Ctrl+C) — skip
    *  the "stream ended before completion" warning in that case. */
@@ -734,6 +743,10 @@ export function createStreamRenderer(sessionId?: string, prompt?: string, steeri
   }
 
   return {
+    begin(text = 'Connecting...') {
+      startSpinner(chalk.dim(text));
+    },
+
     onEvent(event: SSEEvent) {
       // ── Collect every event for session trace ──
       traceEvents.push({ ...event, data: { ...event.data, _ts: Date.now() } });

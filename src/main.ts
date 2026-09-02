@@ -1303,6 +1303,7 @@ async function oneShotChat(
   // a prompt the model half-obeys.
   const omnibox = !!process.env.AWSH_OMNIBOX_LINE;
   const renderer = (fmt === 'text' && !omnibox) ? createStreamRenderer() : null;
+  renderer?.begin();  // see StreamRenderer.begin() -- covers time-to-first-byte
   const started = Date.now();
 
   try {

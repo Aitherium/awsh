@@ -219,6 +219,13 @@ export function createTuiRenderer(
   }
 
   return {
+    // Indication must start before the first SSE event, not on it -- setStatus
+    // is this surface's own channel (the same one onEvent drives below). See
+    // StreamRenderer.begin() in renderer.ts for the 133.4s incident.
+    begin(text = 'Connecting...') {
+      surface.setStatus(text);
+    },
+
     onEvent(event: SSEEvent) {
       traceEvents.push(event);
       const d = event.data || {};

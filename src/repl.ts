@@ -1298,6 +1298,11 @@ export async function startRepl(client: GenesisClient, config: ShellConfig): Pro
       if (process.stdin.isTTY) rl.setPrompt('');
     }
     const renderer = createStreamRenderer(config.sessionId, message, _useSteerBar ? steeringBar : undefined);
+    // Indication starts HERE, not on the first SSE event -- everything below
+    // (context build, health check, the POST, and the backend's own
+    // time-to-first-byte) used to render as a frozen terminal. See
+    // StreamRenderer.begin().
+    renderer.begin();
 
     // Build session context from previous turn for RLM continuity
     // Real conversation first. The profile branch below is kept because it

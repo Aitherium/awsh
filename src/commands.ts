@@ -7271,6 +7271,20 @@ COMMANDS['compute'] = {
   },
 };
 
+// The awstorage inventory control plane (nodes/inventory/diff/proposals/ledger/
+// policy/scan --local). Real parsing and rendering lives in storage-command.ts
+// (shared with `aither storage …` in main.ts and with test/storage-args.test.ts);
+// this builtin only tokenizes the REPL's raw string the same way every other
+// multi-word builtin here does, via parseQuotedArgs.
+COMMANDS['storage'] = {
+  description: 'Storage inventory: nodes, drives, diff, proposals, ledger, policy',
+  usage: '/storage <nodes|inventory|diff|proposals|ledger|policy|scan> [args]',
+  handler: async (client: GenesisClient, args: string) => {
+    const { runStorageCommand } = await import('./storage-command.js');
+    await runStorageCommand(parseQuotedArgs(args.trim()), client);
+  },
+};
+
 /* ═══════════════════════════════════════════════════════════════════════════════
  * AUTONOMOUS AGENT COMMANDS — Calendar, Mail, Will, Escalate, Research, Publish
  * ═══════════════════════════════════════════════════════════════════════════════ */

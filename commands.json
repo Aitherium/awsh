@@ -439,6 +439,12 @@
       ]
     },
     {
+      "name": "storage",
+      "category": "ops",
+      "description": "Storage inventory: nodes, drives, diff, proposals, ledger, policy",
+      "aliases": []
+    },
+    {
       "name": "publish-preflight",
       "category": "dev",
       "description": "Check a package can actually publish, before anything is uploaded",

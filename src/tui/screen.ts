@@ -185,8 +185,8 @@ export interface TuiScreenOpts {
   onType?: () => void;
   /** Fired when the OUTPUT pane is scrolled to the top (relay scrollback). */
   onScrollTop?: () => void;
-  /** Open a live overlay (Ctrl+F flame · Ctrl+N neurons · Ctrl+R reasoning · Ctrl+A affect · Ctrl+P portrait · Ctrl+K graph · Ctrl+S sessions). */
-  onOverlay?: (kind: 'flame' | 'neurons' | 'reasoning' | 'affect' | 'portrait' | 'graph' | 'sessions') => void;
+  /** Open a live overlay (Ctrl+F flame · Ctrl+N neurons · Ctrl+R reasoning · Ctrl+A affect · Ctrl+P portrait · Ctrl+K graph · Ctrl+S sessions · Ctrl+O storage). */
+  onOverlay?: (kind: 'flame' | 'neurons' | 'reasoning' | 'affect' | 'portrait' | 'graph' | 'sessions' | 'room' | 'storage') => void;
   /** A segment of the persistent status bar was clicked (its `key`). */
   onStatusAction?: (key: string) => void;
   /** Timeline instance for new trace rendering (when AITHER_NEW_TRACE=1). */
@@ -683,6 +683,7 @@ export function createTuiScreen(opts: TuiScreenOpts): TuiSurface {
     if (ctrl && name === 'p' && opts.onOverlay) { opts.onOverlay('portrait'); return; }
     if (ctrl && name === 'k' && opts.onOverlay) { opts.onOverlay('graph'); return; }
     if (ctrl && name === 's' && opts.onOverlay) { opts.onOverlay('sessions'); return; }
+    if (ctrl && name === 'o' && opts.onOverlay) { opts.onOverlay('storage'); return; }   // awstorage cockpit
     if (ctrl && name === 'a' && !inputChars.length && opts.onOverlay) { opts.onOverlay('affect'); return; }
     // Ctrl+E: toggle all stages (new-trace) or collapse/expand turns (legacy). Empty line only.
     if (ctrl && name === 'e' && !inputChars.length) {

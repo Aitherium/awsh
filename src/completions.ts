@@ -152,6 +152,15 @@ export function getAgentCompletionNames(): string[] {
 // Subcommand completions for commands that have them
 // Each entry: [name, argHint] — argHint is '' for no-arg subcommands
 export const SUBCOMMAND_DEFS: Record<string, [string, string][]> = {
+  '/storage': [
+    ['nodes', '— which nodes have scanned, how stale'],
+    ['inventory', '[--node N] [--root R] [--top 25] [--cls C] [--refetchable] — ranked disk consumers'],
+    ['diff', '--node N --root R [--from-id ID] [--to-id ID] — added/removed/grown/shrunk'],
+    ['proposals', '[--node N] [--status proposed|all] — pending/answered reclaim proposals'],
+    ['ledger', '[--node N] [--limit 200] — what apply actually did'],
+    ['policy', '— the effective fleet policy (read-only)'],
+    ['scan', '--local <root> — run the scanner here, no fleet needed'],
+  ],
   '/onboard': [
     ['auto', '<path> [name] — Auto-detect code vs knowledge'],
     ['code', '<path> [name] — Index a local codebase'],

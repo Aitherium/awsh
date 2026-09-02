@@ -182,7 +182,7 @@ async function main() {
   // never reach a subcommand's own help — the flag was swallowed before dispatch. Subcommands
   // that print their own usage opt in here; everything else keeps the old behaviour exactly,
   // so this cannot regress a command that has no help of its own.
-  const HELP_AWARE = new Set(['bonsai']);
+  const HELP_AWARE = new Set(['bonsai', 'storage']);
   if ((args.includes('--help') || args.includes('-h')) && !HELP_AWARE.has((args[0] || '').toLowerCase())) {
     printUsage();
     return;
@@ -827,6 +827,17 @@ $rows | ForEach-Object { [Console]::Out.WriteLine("PATH=" + $_) }`;
     return;
   }
 
+  // `aither storage …` — the awstorage inventory control plane (nodes, drives,
+  // proposals, ledger). Unlike `harness`/`room`/`well` above this DOES need a
+  // reachable Genesis (it reads /api/v1/storage/*), but it needs no chat-backend
+  // detection/failover — it hits `client`'s configured URL directly, the same
+  // way the ONESHOT_CMDS below reuse `client` without waiting on resolveBackend().
+  if (args[0] && args[0].toLowerCase() === 'storage') {
+    const { runStorageCommand } = await import('./storage-command.js');
+    process.exitCode = await runStorageCommand(args.slice(1), client);
+    return;
+  }
+
   // `aither well` — draw the ambient context: branch, changes, file locks, agents.
   // Like `harness` and `room`, this is intercepted before backend resolution because
   // the well daemon is a host process that survives when the fleet does not.
@@ -1443,6 +1454,7 @@ ${chalk.bold('TUI:')}
   AITHER_STEER=1 enables the fixed bottom steering bar (limits terminal scrollback).
 
 ${chalk.bold('Quick actions:')}
+  aither storage nodes             Storage inventory: nodes, drives, freshness
   aither -c gaming                Toggle gaming mode (free VRAM for games)
   aither -c "gaming on"           Activate gaming mode
   aither -c apps                  Show all AitherOS app statuses

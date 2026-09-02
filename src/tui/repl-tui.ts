@@ -52,6 +52,8 @@ import { buildKnowledgeGraph } from './knowledge-graph-overlay.js';
 import { buildSessionsPanel } from './sessions-view.js';
 import { fetchUnifiedSessions } from '../sessions-client.js';
 import { buildRoomPanel } from './room-view.js';
+import { buildStoragePanel, type StoragePanelSnapshot } from './storage-view.js';
+import { getStorageNodes } from '../storage-client.js';
 import { fetchRoomSnapshot } from '../room-client.js';
 import { renderPortrait, renderPngFile } from './portrait.js';
 import { emotionFromAffect } from './avatar.js';
@@ -284,9 +286,41 @@ export async function startTuiRepl(client: GenesisClient, config: ShellConfig): 
   }
 
   /** Build overlay lines from the live buffers and open the full-screen viewer. */
-  async function openOverlay(kind: 'flame' | 'neurons' | 'reasoning' | 'affect' | 'portrait' | 'graph' | 'sessions' | 'room'): Promise<void> {
+  async function openOverlay(kind: 'flame' | 'neurons' | 'reasoning' | 'affect' | 'portrait' | 'graph' | 'sessions' | 'room' | 'storage'): Promise<void> {
     const w = Math.max(30, (process.stdout.columns || 100) - 6);
     let title = ''; let lines: string[] = [];
+
+    // Special case: storage cockpit (awstorage inventory plane) with live polling.
+    // The view is pure (snapshot, width) -> lines; the client call happens here so an
+    // unreachable Genesis renders the DEGRADED arm instead of an empty node table.
+    if (kind === 'storage') {
+      let pollInterval: ReturnType<typeof setInterval> | null = null;
+
+      async function renderStorage(): Promise<string[]> {
+        const res = await getStorageNodes(client);
+        const snapshot: StoragePanelSnapshot = res.ok && res.data
+          ? { reachable: true, nodes: res.data.nodes ?? [], total_bytes: res.data.total_bytes }
+          : { reachable: false, nodes: [], error: res.error || `HTTP ${res.status ?? 0}` };
+        return buildStoragePanel(snapshot, w);
+      }
+
+      lines = await renderStorage();
+      // Inventory changes on a scan cadence, not per second: refresh every 15s.
+      pollInterval = setInterval(async () => {
+        try {
+          lines = await renderStorage();
+          surface.updateViewer?.(lines);
+        } catch {
+          // Poll errors are silent — the last good frame stays up
+        }
+      }, 15000);
+      try {
+        await surface.showViewer(title || 'Storage (Ctrl+O)', lines);
+      } finally {
+        if (pollInterval) clearInterval(pollInterval);
+      }
+      return;
+    }
 
     // Special case: sessions view with live polling
     if (kind === 'sessions') {

@@ -1,6 +1,6 @@
 {
   "name": "@aitherium/awsh",
-  "version": "1.18.8",
+  "version": "1.18.9",
   "description": "awsh - your terminal answers you. Type a question where a command would go, and get an answer instead of \"command not found\".",
   "license": "BUSL-1.1",
   "type": "module",

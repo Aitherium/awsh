@@ -1,0 +1,27 @@
+{
+  "schemaVersion": "1",
+  "name": "awsh",
+  "description": "Your terminal answers you -- type a question where a command would go.",
+  "url": "https://aitherium.github.io/awsh/",
+  "repository": "https://github.com/Aitherium/awsh",
+  "kind": "tool",
+  "status": "public",
+  "adopt": "Type a question at your prompt and get an answer instead of \"command not found\".",
+  "pairs_with": [
+    "awdk",
+    "awfind",
+    "awbrowse",
+    "awembed"
+  ],
+  "includes": [],
+  "metrics": {
+    "files": {
+      "value": 1142,
+      "as_of": "2026-09-05T05:49:31Z"
+    },
+    "tests": {
+      "value": 47,
+      "as_of": "2026-09-05T05:49:31Z"
+    }
+  }
+}

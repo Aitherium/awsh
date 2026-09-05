@@ -97,6 +97,11 @@ function pwshSnippet(): string {
 # Remove for good:      delete this block from your profile.
 if (-not $global:__AwshOmnibox) {
     $global:__AwshOmnibox = $true
+    # Seed the re-entrancy flag at INSTALL time. It is only assigned inside the
+    # handler's own scriptblock, so the FIRST command-not-found of a session read
+    # an unset global -- which throws under strict mode and prints an
+    # InvalidOperation in the user's face before the omnibox answers anyway.
+    $global:__AwshBusy = $false
 
     # Keep whatever hook was already installed. Another tool may own this, and
     # silently replacing it is how two features that both "work" delete each other.

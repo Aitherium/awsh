@@ -11,17 +11,18 @@
     "awdk",
     "awfind",
     "awbrowse",
-    "awembed"
+    "awembed",
+    "awdesk"
   ],
   "includes": [],
   "metrics": {
     "files": {
       "value": 1144,
-      "as_of": "2026-09-07T03:13:55Z"
+      "as_of": "2026-09-07T03:17:24Z"
     },
     "tests": {
       "value": 47,
-      "as_of": "2026-09-07T03:13:55Z"
+      "as_of": "2026-09-07T03:17:24Z"
     }
   }
 }

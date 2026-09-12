@@ -180,7 +180,7 @@ export const CLOUD_IDENTITY_URL = (process.env.AITHER_CLOUD_IDENTITY_URL || 'htt
   .replace(/\/+$/, '');
 
 /** True if a URL is loopback/private (still the local default, safe to repoint). */
-function isLoopback(url: string): boolean {
+export function isLoopback(url: string): boolean {
   try {
     const h = new URL(url).hostname;
     return h === 'localhost' || h === '127.0.0.1' || h === '::1' ||

@@ -104,7 +104,7 @@ import { readFileSync } from 'fs';
 import { extname } from 'path';
 import { VERSION as SHELL_VERSION } from './version.js';
 import type { ShellConfig } from './config.js';
-import { loadConfig, setActiveConfig, deepseekProvider, kimiProvider, DEFAULT_AGENT} from './config.js';
+import { loadConfig, setActiveConfig, deepseekProvider, kimiProvider, DEFAULT_AGENT, isLoopback, CLOUD_IDENTITY_URL } from './config.js';
 import { resolveBackend } from './backend-resolver.js';
 import { GenesisClient } from './client.js';
 import { renderBanner, createStreamRenderer } from './renderer.js';
@@ -714,7 +714,9 @@ $rows | ForEach-Object { [Console]::Out.WriteLine("PATH=" + $_) }`;
   // "login" fell through to positional one-shot chat → POSTed to the gateway's
   // /chat/stream (which the OpenAI-compat gateway doesn't serve) → 404, surfaced
   // as a confusing "Error: not_found". Device login always uses the IDENTITY URL.
-  if (args[0] === 'login') {
+  // `--login` was parsed (loginIdx) but never acted on — the documented flag was
+  // dead code and fell through to the REPL. Same path as the subcommand now.
+  if (args[0] === 'login' || loginIdx >= 0) {
     await ensureDeviceLogin(client, config);
     process.exit(0);
   }
@@ -736,17 +738,46 @@ $rows | ForEach-Object { [Console]::Out.WriteLine("PATH=" + $_) }`;
   // Open a raw interactive shell into a prod/dev environment through the tunnel
   // (wss://<tunnel>/tunnel/ssh) from ANY PC. Must work as a top-level subcommand
   // BEFORE the REPL. Device-login first if needed.
+  //
+  // Headless one-shot (no TTY needed — CI, cron, PowerShell, Claude Code/Codex):
+  //   aither connect [container] -x "<cmd>"      one command
+  //   aither connect [container] -- <cmd…>       everything after `--` is ONE line
+  //   aither connect [container] --json -x "…"   {code, output, reason} on stdout
+  // Exit code = the remote `$?` in container mode; 0/1 for the restricted shell.
   if (args[0] === 'connect' || args[0] === 'ssh') {
     const rest = args.slice(1);
     let container: string | undefined;
     let host: string | undefined;
+    let timeoutMs: number | undefined;
+    const commands: string[] = [];
+    let json = false;
     for (let i = 0; i < rest.length; i++) {
-      if ((rest[i] === '--container' || rest[i] === '-c') && rest[i + 1]) { container = rest[++i]; }
+      if (rest[i] === '--') { commands.push(rest.slice(i + 1).join(' ')); break; }
+      else if ((rest[i] === '--exec' || rest[i] === '-x') && rest[i + 1]) { commands.push(rest[++i]); }
+      else if (rest[i] === '--timeout' && rest[i + 1]) { timeoutMs = Number(rest[++i]) * 1000; }
+      else if (rest[i] === '--json') { json = true; }
+      else if ((rest[i] === '--container' || rest[i] === '-c') && rest[i + 1]) { container = rest[++i]; }
       else if ((rest[i] === '--tunnel' || rest[i] === '--host') && rest[i + 1]) { host = rest[++i]; }
       else if (!rest[i].startsWith('-') && !container) { container = rest[i]; }
     }
-    const { getActiveToken } = await import('./auth.js');
-    if (!getActiveToken()) { await ensureDeviceLogin(client, config); }
+    const { getActiveProfile } = await import('./auth.js');
+    // The auto-provisioned local root profile is NOT a login the tunnel accepts
+    // (it closes 4001). Treat it as signed-out here so we device-login instead of
+    // failing after the handshake.
+    const profile = getActiveProfile();
+    if (!profile?.access_token || profile.token_type === 'local') {
+      await ensureDeviceLogin(client, config);
+    }
+    if (commands.length) {
+      const { execRemote } = await import('./terminal-exec.js');
+      const result = await execRemote(
+        { container, host, commands, timeoutMs },
+        json ? undefined : (chunk) => process.stdout.write(chunk),
+      );
+      if (json) process.stdout.write(JSON.stringify(result) + '\n');
+      else if (result.reason === 'error' || result.reason === 'timeout') process.stderr.write(chalk.red(`  ${result.reason}: ${result.output.trim().split('\n').pop()}\n`));
+      process.exit(result.code);
+    }
     const { connectTerminal } = await import('./terminal.js');
     const code = await connectTerminal({ container, host });
     process.exit(code);
@@ -996,6 +1027,15 @@ async function ensureDeviceLogin(client: GenesisClient, config: ShellConfig): Pr
   console.log();
   console.log(chalk.bold('  🔐 This endpoint requires sign-in (no local root).'));
   try {
+    // `aither login` / `connect` run BEFORE resolveBackend(), so the cloud
+    // repoint of a loopback identityUrl (config.ts) hasn't happened yet and the
+    // device-code request died with "fetch failed" against 127.0.0.1:8115.
+    // Probe the local IdP briefly; fall back to the public edge if it's absent.
+    if (isLoopback(config.identityUrl)) {
+      const localUp = await fetch(`${config.identityUrl}/health`, { signal: AbortSignal.timeout(1500) })
+        .then((r) => r.ok).catch(() => false);
+      if (!localUp) config.identityUrl = CLOUD_IDENTITY_URL;
+    }
     const dc = await requestDeviceCode(config.identityUrl, 'AitherShell');
     console.log();
     console.log('  Open this URL in your browser and approve the device:');

@@ -84,6 +84,27 @@ completes them.
 | `/imagine` `/generate` `/notebook` | making things |
 | `/escalate` `/approve` `/expedition` | when a human has to decide |
 
+## Reaching home from anywhere
+
+`aither connect` opens a terminal into your own infrastructure through
+`tunnel.aitherium.com` — no VPN, no port-forward, device-flow login. Add
+`-x` and it runs one command headlessly instead, which is what CI, cron,
+PowerShell and coding agents (Claude Code, Codex) need: none of them have a
+TTY.
+
+```bash
+aither login                                  # device flow, once
+aither connect                                # interactive shell (Ctrl-Q detaches)
+aither connect -x "docker ps"                 # headless; output + exit code
+aither connect -x "docker logs --tail 50 aitheros-arc-solver"
+aither connect devws-you -- make test         # inside a dev workspace: real $? comes back
+aither connect --json -x "docker ps"          # {"code","output","reason"} for scripts
+```
+
+Without a workspace name you land in the tunnel's restricted shell
+(`docker`, `curl`, `cat`, `grep`, `ps`, `git`, … — one command per line, no
+`;`). With one you get the workspace's tmux-backed bash.
+
 ## Where it sits
 
 `awsh` is the front door of the **Aither World** — the same tools an agent uses,

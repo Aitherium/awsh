@@ -24,8 +24,10 @@ import type { ShellConfig } from './config.js';
 import { setActiveConfig, deepseekProvider, kimiProvider, roleProvider, getActiveConfig } from './config.js';
 import { RelayClient, resolveRelayUrl, type RelayMessage, type RelayUser } from './relay.js';
 import { createStreamRenderer, SteeringBar, type SessionProfile } from './renderer.js';
+import { stripFenceDelimiters } from './tui/chat-formatter.js';
 import { getCommand, getCommandNames, invokeMcpTool } from './commands.js';
 import { getCommandRegistry } from './command-registry.js';
+import { runWithDetachedStdin } from './stdin-detach.js';
 import { loadAgentNames, resolveAgentMention, completer, refreshCommandCompletions, SUBCOMMANDS, SUBCOMMAND_DEFS } from './completions.js';
 import { collectArgs } from './interactive.js';
 import {
@@ -35,7 +37,7 @@ import {
   type Job,
 } from './jobs.js';
 import { configureRemoteSync, recordTurn, loadSession, buildContextSummary } from './session-store.js';
-import { personaSpeaking, personaIdle } from './persona-bridge.js';
+import { personaSpeaking, personaIdle } from './awdesk-bridge.js';
 import { setCurrentCommand, withCrashReporting } from './crash-reporter.js';
 import { askHidden, isSecretBearing, redactForHistory } from './secret-input.js';
 
@@ -342,6 +344,16 @@ export async function startRepl(client: GenesisClient, config: ShellConfig): Pro
     } catch {}
   }, 10_000);
 
+  /**
+   * Run an inquirer prompt with the outer readline detached from stdin, so its
+   * 'data'/'keypress' listeners don't fight the prompt's. Prevents the dead
+   * first Enter after a slash-command picker. The caller restores raw mode via
+   * restoreReadline() afterward, matching the command path's finally block.
+   */
+  function withDetachedStdin<T>(fn: () => Promise<T>): Promise<T> {
+    return runWithDetachedStdin(process.stdin as any, rl, fn);
+  }
+
   /** Restore readline + stdin after inquirer or any handler that disturbs them. */
   function restoreReadline(): void {
     refStdin();
@@ -402,7 +414,10 @@ export async function startRepl(client: GenesisClient, config: ShellConfig): Pro
       const contentLines = sepIdx >= 0
         ? job.output.slice(sepIdx + 1)
         : job.output.filter(l => !l.startsWith('['));
-      const content = contentLines.join('\n').trim();
+      // The inline preview is often a command the user runs straight from the
+      // notification, so it gets the same treatment as every other emitter:
+      // fence delimiters dropped, body untouched.
+      const content = stripFenceDelimiters(contentLines.join('\n')).trim();
       if (content.length > 0 && content.length <= 500) {
         // Short enough to show inline
         preview = '\n' + content.split('\n').map(l => `  ${l}`).join('\n');
@@ -477,9 +492,7 @@ export async function startRepl(client: GenesisClient, config: ShellConfig): Pro
     try {
       // Erase the prompt line and pause readline
       process.stdout.write('\r\x1B[2K');
-      rl.pause();
-
-      selected = await search<string>({
+      selected = await withDetachedStdin(() => search<string>({
         message: chalk.green('/'),
         source: (input) => {
           lastSearchInput = input || '';
@@ -499,7 +512,7 @@ export async function startRepl(client: GenesisClient, config: ShellConfig): Pro
             highlight: (text: string) => chalk.cyan.bold(text),
           },
         },
-      });
+      }));
     } catch {
       // Ctrl+C / Escape — go back to prompt
     }
@@ -516,7 +529,7 @@ export async function startRepl(client: GenesisClient, config: ShellConfig): Pro
       const pickerParts = (lastSearchInput || '').trim().split(/\s+/);
       const trailingArgs = pickerParts.length > 1 ? pickerParts.slice(1).join(' ') : '';
 
-      // D-2171 defensive guard: @inquirer/search's Enter handler resolves
+      // Defensive guard: @inquirer/search's Enter handler resolves
       // against `searchResults[active]`, populated by an UNDEBOUNCED async
       // source() call fired on every keystroke (search/dist/index.js:58-91,
       // 94-138) — nothing guarantees the render Enter fires against matches
@@ -560,8 +573,6 @@ export async function startRepl(client: GenesisClient, config: ShellConfig): Pro
         let subSearchInput = '';
         try {
           process.stdout.write('\r\x1B[2K');
-          rl.pause();
-
           const subChoices = subDefs.map(([name, argHint]) => ({
             name: argHint
               ? `${chalk.cyan(name)} ${chalk.dim(argHint)}`
@@ -570,7 +581,7 @@ export async function startRepl(client: GenesisClient, config: ShellConfig): Pro
             description: '',
           }));
 
-          subSelected = await search<string>({
+          subSelected = await withDetachedStdin(() => search<string>({
             message: chalk.green(`/${selected} `),
             source: (input) => {
               subSearchInput = input || '';
@@ -582,7 +593,7 @@ export async function startRepl(client: GenesisClient, config: ShellConfig): Pro
               prefix: ' ',
               style: { highlight: (text: string) => chalk.cyan.bold(text) },
             },
-          });
+          }));
         } catch {
           // Ctrl+C / Escape
         }
@@ -1083,35 +1094,23 @@ export async function startRepl(client: GenesisClient, config: ShellConfig): Pro
           // stdin directly (e.g. /login) get exclusive access to keystrokes.
           // rl.pause() alone doesn't work — readline's internal 'data'/'keypress'
           // listeners still intercept and buffer input.
-          rl.pause();
-          const stdinListeners = process.stdin.rawListeners('data').slice();
-          const keypressListeners = process.stdin.rawListeners('keypress').slice();
-          process.stdin.removeAllListeners('data');
-          process.stdin.removeAllListeners('keypress');
-          if (process.stdin.isTTY) process.stdin.setRawMode(false);
-          process.stdin.resume();
-
-          // Bare invocation of a command with a subcommand table → collect its
-          // arguments interactively (stdin is already detached above, so
-          // @inquirer owns the keystrokes). Cancelling aborts the command.
-          let finalArgs = cmdArgs;
-          let cancelled = false;
-          const subDefs = SUBCOMMAND_DEFS['/' + cmdName];
-          if (!cmdArgs && subDefs?.length) {
-            const collected = await collectArgs(cmdName, subDefs);
-            if (collected === null) { cancelled = true; console.log(chalk.dim('  (cancelled)')); }
-            else finalArgs = collected;
-          }
-          if (!cancelled) {
-            setCurrentCommand(`/${cmdName} ${finalArgs}`.trim());
-            await cmd.handler(client, finalArgs, config);
-          }
-
-          // Reattach readline's listeners
-          process.stdin.removeAllListeners('data');
-          process.stdin.removeAllListeners('keypress');
-          for (const fn of stdinListeners) process.stdin.on('data', fn as (...args: any[]) => void);
-          for (const fn of keypressListeners) process.stdin.on('keypress', fn as (...args: any[]) => void);
+          await withDetachedStdin(async () => {
+            // Bare invocation of a command with a subcommand table → collect its
+            // arguments interactively (stdin is detached, so @inquirer owns the
+            // keystrokes). Cancelling aborts the command.
+            let finalArgs = cmdArgs;
+            let cancelled = false;
+            const subDefs = SUBCOMMAND_DEFS['/' + cmdName];
+            if (!cmdArgs && subDefs?.length) {
+              const collected = await collectArgs(cmdName, subDefs);
+              if (collected === null) { cancelled = true; console.log(chalk.dim('  (cancelled)')); }
+              else finalArgs = collected;
+            }
+            if (!cancelled) {
+              setCurrentCommand(`/${cmdName} ${finalArgs}`.trim());
+              await cmd.handler(client, finalArgs, config);
+            }
+          });
         } catch (err: any) {
           console.log(chalk.red(`  Error: ${err.message}`));
           // Prompt user to send error report
@@ -1341,7 +1340,7 @@ export async function startRepl(client: GenesisClient, config: ShellConfig): Pro
       // Only repl-tui.ts drove the Persona desktop overlay before this — the
       // plain `awsh` REPL had no wiring at all, so talking to Aither here
       // never moved the avatar. personaSpeaking()/personaIdle() are
-      // fire-and-forget with their own dead-endpoint cooldown (persona-bridge.ts),
+      // fire-and-forget with their own dead-endpoint cooldown (awdesk-bridge.ts),
       // so this is a no-op when Persona isn't running.
       personaSpeaking();
       const stream = client.streamChat(message, {

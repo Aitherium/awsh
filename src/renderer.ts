@@ -14,6 +14,7 @@ import { homedir } from 'os';
 import { spawn } from 'child_process';
 import type { SSEEvent } from './client.js';
 import { getActiveConfig } from './config.js';
+import { stripWrappingFence } from './tui/chat-formatter.js';
 // The ONE design system (palette, gradient wordmark, hairline rules, status
 // dots, glyphs). Namespaced so every styled surface here is obviously themed.
 import * as T from './theme.js';
@@ -218,7 +219,7 @@ export function renderBanner(info: {
   serviceLines?: { name: string; up: boolean }[];
   backendType?: string;
   backendName?: string;
-  // D-2170: explicit override for terminal width, so a test can control it
+  // Explicit override for terminal width, so a test can control it
   // directly instead of mutating process.stdout.columns via
   // Object.defineProperty. That mutation is provably environment-dependent
   // — reproduced clean under Node 22 locally, still failed on the actual
@@ -396,7 +397,6 @@ export function resolveImagePath(relativePath: string): string {
   // Try known AitherOS roots (the Library is bind-mounted under <root>/AitherOS).
   const roots = [
     process.env.AITHER_ROOT,
-    'D:\\AitherOS-Fresh',          // dev box repo root
     resolve(home, 'AitherOS-Fresh'),
     resolve(home, 'AitherOS'),
   ].filter(Boolean) as string[];
@@ -432,7 +432,7 @@ function backendBase(): string {
  * the root and appending one produces the doubled /portal/portal path.
  */
 function portalBase(): string {
-  const base = process.env.AITHER_PORTAL_URL || 'https://portal.aitherium.com';
+  const base = process.env.AITHER_PORTAL_URL || 'https://app.aitherium.com';
   return String(base).replace(/\/+$/, '');
 }
 
@@ -517,6 +517,13 @@ export function autoOpenImagesFromText(text: string): void {
  * Fix: keep a fence's language only when highlight.js knows it (first token,
  * `supportsLanguage`), else drop to plaintext, and close a dangling fence at
  * end-of-text. Well-formed markdown passes through untouched.
+ *
+ * This and `stripWrappingFence` below are complementary, not duplicates: this
+ * one repairs a fence that sits ANYWHERE in the reply, and `stripWrappingFence`
+ * handles the case where the entire reply IS one fence and skips parsing it at
+ * all. Ported from the public mirror, where it was fixed first and existed only
+ * there -- the sync lane mirrors this tree destructively, so a fix living only
+ * on the mirror is a fix the next sync deletes.
  */
 export function sanitizeCodeFences(md: string): string {
   const NL = String.fromCharCode(10);
@@ -544,6 +551,11 @@ export function sanitizeCodeFences(md: string): string {
 }
 
 export function renderMarkdown(text: string): string {
+  // A reply that IS one fenced block is a command the user copies, so return it
+  // verbatim instead of parsing it: rendering it buys nothing and its reflow
+  // would re-join the block's lines into the paragraph above.
+  const fenced = stripWrappingFence(text);
+  if (fenced !== text) return fenced;
   try {
     let clean = text;
     clean = decodeHtmlEntities(clean);

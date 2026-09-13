@@ -251,10 +251,30 @@ export function formatTrace(event: SSEEvent): string | null {
     case 'approval_required':
     case 'image_gen_complete':
     case 'heartbeat':
+    // The model's chain of thought, streamed as its OWN channel by
+    // MicroScheduler's _ThinkBlockFilter (structured `reasoning_content`
+    // deltas, inline <think> blocks, and the untagged `thought` preamble).
+    //
+    // These two were in the DISCARD list below, next to 'keepalive' and
+    // 'debug'. So the shell received the thought bubble and threw it away --
+    // one line of intent, not a wiring gap -- while rendering every
+    // `reasoning_*` event in magenta a hundred lines above. The pane already
+    // existed; it was fed nothing.
+    //
+    // Dimmed and clipped on purpose: reasoning is CONTEXT for the answer, not
+    // the answer. A model can spend hundreds of tokens thinking, and printing
+    // it at full width and full brightness would bury the reply it belongs to.
+    case 'thinking':
+      return dim(`  🧠 ${clip(scalar(d.content ?? d.text ?? d.t), 80)}`);
+
+    // End of a block: emit nothing rather than a divider. The next visible
+    // token is the answer, and a rule between them adds noise to every turn a
+    // reasoning model takes -- which, on this fleet, is most of them.
+    case 'thinking_end':
+      return null;
+
     case 'keepalive':
     case 'debug':
-    case 'thinking':
-    case 'thinking_end':
     case 'session_start':
       return null;
 

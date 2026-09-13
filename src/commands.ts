@@ -40,15 +40,15 @@ import {
 import { runWizard } from './install-wizard.js';
 import {
   personaHealthy,
-  getPersonaStatus,
-  setPersonaCharacter,
+  getAwdeskStatus,
+  setAwdeskCharacter,
   personaWindowAction,
-  playPersonaAnimation,
-  listPersonaAnimations,
-  setPersonaAgent,
-  listPersonaAgentAvatars,
-  exportPersonaToShell,
-} from './persona-bridge.js';
+  playAwdeskAnimation,
+  listAwdeskAnimations,
+  setAwdeskAgent,
+  listAwdeskAgentAvatars,
+  exportAwdeskToShell,
+} from './awdesk-bridge.js';
 import {
   addProject, listProjects, switchProject, removeProject, getActiveWorkspace, pickDirectory,
 } from './workspace.js';
@@ -5224,6 +5224,36 @@ const COMMANDS: Record<string, Command> = {
 };
 
 // ── /sessions command ──
+COMMANDS['resume'] = {
+  description: 'Reopen the coding sessions you had open, on a backend you choose',
+  usage: '/resume [all|restore|snapshot|list] [on deepseek|kimi|anthropic]',
+  handler: async (_client, args) => {
+    // Shells out to AitherResume rather than reimplementing it. That engine
+    // holds the liveness detector, the crash verdict and the snapshot store, and
+    // a second copy of that judgement here would drift from it the first week.
+    //
+    // WHY THIS VERB EXISTS: `sessions` is about session TRACES (telemetry) and
+    // resumes nothing, despite commands.json describing it as "List or resume
+    // past sessions". There was no way to reopen a session from awsh at all --
+    // the owner was being handed the engine's absolute path to type.
+    //
+    // The backend words are parsed by the wrapper, not here: one parser, so
+    // `aither resume on deepseek` and `aither-resume on deepseek` cannot drift.
+    const repoRoot = resolve(__dirname, '..', '..', '..', '..', '..');
+    const cli = join(repoRoot, '.PRODUCTS', '.AITHERRESUME', 'bin', 'aither-resume.ps1');
+    if (!existsSync(cli)) {
+      console.log(chalk.red(`  AitherResume not found at ${cli}`));
+      console.log(chalk.dim('  It ships in this repo; nothing to install.'));
+      return;
+    }
+    const passthrough = args.trim().length ? args.trim().split(/\s+/) : [];
+    const child = spawn('pwsh', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', cli, ...passthrough], {
+      cwd: repoRoot, stdio: 'inherit',
+    });
+    await new Promise<void>((res) => child.on('close', () => res()));
+  },
+};
+
 COMMANDS['sessions'] = {
   description: 'List or inspect saved session traces',
   usage: '/sessions [session_id]',
@@ -6201,6 +6231,30 @@ COMMANDS['obsidian'] = {
 
 // ── /models — Model routing control plane ──────────────────────────────
 
+// Genesis publishes NO host port, so from the host the REST /reasoning/* routes
+// are unreachable by design; the ADK daemon does not proxy them either. The
+// same control plane is served as MCP tools (reasoning_status,
+// reasoning_switch_profile, reasoning_set_model, reasoning_set_effort_route)
+// through the gateway. REST first (in-network sessions), MCP when REST answers
+// nothing — measured 2026-09-10: "Reasoning config endpoint unavailable.
+// Rebuild Genesis" on a healthy Genesis, from every host session.
+async function reasoningCall(
+  client: GenesisClient,
+  rest: () => Promise<any>,
+  tool: string,
+  params: Record<string, any> = {},
+): Promise<any> {
+  const viaRest = await rest();
+  if (viaRest && !viaRest.error) return viaRest;
+  const viaMcp = await invokeMcpTool(client, tool, params);
+  if (viaMcp && !viaMcp.error) return viaMcp;
+  return {
+    error: `${viaMcp?.error || viaRest?.error || 'reasoning control plane unreachable'} `
+      + '(REST /reasoning/* is in-network only; MCP tool '
+      + `${tool} needs a reachable gateway — AITHER_MCP_URL=http://127.0.0.1:8182/mcp on the desktop)`,
+  };
+}
+
 function formatRoutingTiers(routing: any): string {
   if (!routing?.tiers) return '  (no routing data)';
   return Object.entries(routing.tiers as Record<string, string>)
@@ -6231,10 +6285,9 @@ COMMANDS.models = {
 
     if (sub === 'status' || sub === '') {
       const spinner = ora('Loading model routing...').start();
-      const data = await client.get('/reasoning/status');
+      const data = await reasoningCall(client, () => client.get('/reasoning/status'), 'reasoning_status');
       spinner.stop();
-      if (!data) { console.log(chalk.red('  Reasoning config endpoint unavailable. Rebuild Genesis: docker compose -f docker-compose.aitheros.yml up -d --build aitheros-genesis')); return; }
-      if (data?.error) { console.log(chalk.red(`  ${data.error}`)); return; }
+      if (!data || data?.error) { console.log(chalk.red(`  ${data?.error || 'Reasoning control plane unreachable'}`)); return; }
       console.log();
       console.log(chalk.bold('  Profile: ') + chalk.cyan(data.display_name) + chalk.dim(` (${data.active_profile})`));
       console.log(chalk.bold('  Model:   ') + data.model + chalk.dim(` via ${data.backend}`));
@@ -6263,7 +6316,7 @@ COMMANDS.models = {
 
     if (sub === 'list') {
       const spinner = ora('Fetching profiles...').start();
-      const data = await client.get('/reasoning/profiles');
+      const data = await reasoningCall(client, () => client.get('/reasoning/profiles'), 'reasoning_status');
       spinner.stop();
       if (!data || data?.error) { console.log(chalk.red(`  ${data?.error || 'Reasoning config unavailable — rebuild Genesis'}`)); return; }
       console.log();
@@ -6284,7 +6337,7 @@ COMMANDS.models = {
       const profile = parts[1];
       if (!profile) { console.log(chalk.yellow('  Usage: /models use <profile>')); return; }
       const spinner = ora(`Switching to ${profile}...`).start();
-      const data = await client.put('/reasoning/profile', { profile });
+      const data = await reasoningCall(client, () => client.put('/reasoning/profile', { profile }), 'reasoning_switch_profile', { profile });
       spinner.stop();
       if (data?.error) { console.log(chalk.red(`  ${data.error}`)); return; }
       console.log(chalk.green(`  Switched to ${data.display_name || profile} (model: ${data.model})`));
@@ -6301,7 +6354,7 @@ COMMANDS.models = {
         return;
       }
       const spinner = ora(`Setting ${slot} = ${model}...`).start();
-      const data = await client.put('/reasoning/model', { slot, value: model });
+      const data = await reasoningCall(client, () => client.put('/reasoning/model', { slot, value: model }), 'reasoning_set_model', { slot, model });
       spinner.stop();
       if (data?.error) { console.log(chalk.red(`  ${data.error}`)); return; }
       console.log(chalk.green(`  ${data.slot}: ${data.old_value} → ${data.new_value}`));
@@ -6326,7 +6379,7 @@ COMMANDS.models = {
       const body: any = { tier, model };
       if (backend) body.backend = backend;
       const spinner = ora(`Setting ${tier} tier → ${model}...`).start();
-      const data = await client.put('/reasoning/effort-route', body);
+      const data = await reasoningCall(client, () => client.put('/reasoning/effort-route', body), 'reasoning_set_effort_route', body);
       spinner.stop();
       if (data?.error) { console.log(chalk.red(`  ${data.error}`)); return; }
       console.log(chalk.green(`  ${data.tier} tier → ${data.route.model} (${data.route.backend})`));
@@ -8005,12 +8058,22 @@ COMMANDS['monitor'] = {
     },
 };
 
-// ── Products CLI ─────────────────────────────────────────────────────────
+// ── /scaffold — product scaffolding (init|deploy|list) ───────────────────
+//
+// REGISTERED AS 'scaffold', NOT 'products', since 2026-09-11. It was
+// COMMANDS['products'] and so is the instance-management block above, and two
+// assignments to one key means the LATER one wins: this block was silently
+// shadowing `/products [list|catalog|deploy|status|destroy]` — the complete
+// handler that `commands.json` actually declares ("Manage standalone product
+// instances (deploy/list/status/destroy)"). Nobody saw it because nothing
+// checked for a doubled registry key; check_duplicate_top_level_decls.py does
+// now. The two are complementary, not duplicates: /products manages a RUNNING
+// instance, /scaffold creates a new product and deploys it to a subdomain.
 import { productsInit, productsDeploy, productsList } from './products.js';
 
-COMMANDS['products'] = {
-  description: 'Product scaffolding and deployment (init, deploy, list)',
-  usage: 'products <subcommand> [--flags]\n  products init --name=MyProduct --port=8902 --category=business_agent\n  products deploy --name=myproduct --subdomain=myproduct\n  products list',
+COMMANDS['scaffold'] = {
+  description: 'Scaffold a new product and deploy it to a subdomain (init, deploy, list)',
+  usage: '/scaffold <init|deploy|list> [--flags]\n  /scaffold init --name=MyProduct --port=8902 --category=business_agent\n  /scaffold deploy --name=myproduct --subdomain=myproduct\n  /scaffold list',
   handler: async (client, args, config) => {
     const sub = args.trim().split(/\s+/)[0] || '';
     const rest = args.trim().slice(sub.length).trim();
@@ -8019,10 +8082,11 @@ COMMANDS['products'] = {
       case 'deploy': return productsDeploy(client, rest, config);
       case 'list': return productsList(client, rest, config);
       default:
-        console.log(chalk.dim('Usage: products <init|deploy|list> [--flags]'));
+        console.log(chalk.dim('Usage: /scaffold <init|deploy|list> [--flags]'));
         console.log(chalk.dim('  init   — scaffold a new product'));
         console.log(chalk.dim('  deploy — deploy a product to subdomain'));
         console.log(chalk.dim('  list   — show registered products'));
+        console.log(chalk.dim('  (/products manages an already-running instance)'));
     }
   },
 };
@@ -8414,28 +8478,28 @@ COMMANDS['report-bug'] = {
   },
 };
 
-// ── /persona command ──
-COMMANDS['persona'] = {
-  description: 'Control the Persona desktop VRM avatar overlay',
-  usage: '/persona [status|start|show|hide|toggle|list|anim <name>|anims|agent <name>|agents|export|<character>]',
+// ── /desk command (awdesk, formerly awdesk; /desk stays as an alias) ──
+COMMANDS['desk'] = {
+  description: 'Control the awdesk desktop overlay (avatar, tray, decision cards)',
+  usage: '/desk [status|start|show|hide|toggle|list|anim <name>|anims|agent <name>|agents|export|<character>]',
   handler: async (_client: GenesisClient, args: string) => {
     const sub = args.trim().toLowerCase();
 
     if (!sub || sub === 'status') {
-      // Show Persona status and available characters
-      const spinner = ora('Checking Persona status...').start();
+      // Show awdesk status and available characters
+      const spinner = ora('Checking awdesk status...').start();
       try {
-        const status = await getPersonaStatus();
+        const status = await getAwdeskStatus();
         spinner.stop();
 
         if (!status.running) {
-          console.log(chalk.yellow('\n  Persona is not running.\n'));
-          console.log(chalk.dim('  Start it with: /persona start'));
+          console.log(chalk.yellow('\n  awdesk is not running.\n'));
+          console.log(chalk.dim('  Start it with: /desk start'));
           console.log('');
           return;
         }
 
-        console.log(chalk.bold('\n  Persona Status\n'));
+        console.log(chalk.bold('\n  awdesk Status\n'));
         console.log(chalk.green('  ✓ Running'));
         if (status.characters && status.characters.length > 0) {
           console.log(chalk.bold('\n  Available Characters:\n'));
@@ -8443,7 +8507,7 @@ COMMANDS['persona'] = {
             console.log(`  ${chalk.cyan('•')} ${char}`);
           }
           console.log();
-          console.log(chalk.dim(`  Switch: /persona <name>  ·  Show: /persona show  ·  Hide: /persona hide`));
+          console.log(chalk.dim(`  Switch: /desk <name>  ·  Show: /desk show  ·  Hide: /desk hide`));
         }
         console.log('');
       } catch (err: any) {
@@ -8454,16 +8518,17 @@ COMMANDS['persona'] = {
     }
 
     if (sub === 'start') {
-      // Start Persona if it's not running
-      const spinner = ora('Checking Persona...').start();
+      // Start awdesk if it's not running
+      const spinner = ora('Checking awdesk...').start();
       const healthy = await personaHealthy();
       if (healthy) {
-        spinner.succeed('Persona is already running');
+        spinner.succeed('awdesk is already running');
         return;
       }
 
-      spinner.text = 'Starting Persona...';
-      const personaStart = process.env.PERSONA_START_CMD || 'D:\\persona\\persona-start.cmd';
+      spinner.text = 'Starting awdesk...';
+      const personaStart = process.env.AWDESK_START_CMD || process.env.PERSONA_START_CMD
+        || 'D:\\desk\\desk-start.cmd';
       try {
         // Spawn detached so it runs independently
         spawn('cmd', ['/c', personaStart], {
@@ -8472,10 +8537,10 @@ COMMANDS['persona'] = {
           windowsHide: true,
         }).unref();
 
-        // POLL, don't peek once. Persona is an Electron app cold-loading a VRM
+        // POLL, don't peek once. awdesk is an Electron app cold-loading a VRM
         // model; measured 2026-08-24 it binds :47831 well after the old fixed
         // 1.5s wait, so this path warned "health check failed" on every cold
-        // start that actually succeeded — and the user's next /persona worked,
+        // start that actually succeeded — and the user's next /desk worked,
         // making the warning read as flaky rather than as impatient.
         const deadline = Date.now() + 30_000;
         let nowHealthy = false;
@@ -8484,26 +8549,26 @@ COMMANDS['persona'] = {
           nowHealthy = await personaHealthy();
           if (nowHealthy) break;
           const waited = Math.round((Date.now() - (deadline - 30_000)) / 1000);
-          spinner.text = `Starting Persona... (${waited}s)`;
+          spinner.text = `Starting awdesk... (${waited}s)`;
         }
         if (nowHealthy) {
-          spinner.succeed('Persona started');
+          spinner.succeed('awdesk started');
         } else {
-          spinner.warn('Persona did not answer /health within 30s — check D:\\persona\\electron-launch.log');
+          spinner.warn('awdesk did not answer /health within 30s — check D:\\desk\\electron-launch.log');
         }
       } catch (err: any) {
-        spinner.fail('Failed to start Persona');
+        spinner.fail('Failed to start awdesk');
         console.log(chalk.red(`  ${err?.message || err}`));
-        console.log(chalk.dim(`  Ensure D:\\persona\\persona-start.cmd exists`));
+        console.log(chalk.dim(`  Ensure D:\\desk\\desk-start.cmd exists (or set AWDESK_START_CMD)`));
       }
       return;
     }
 
     if (sub === 'show' || sub === 'hide' || sub === 'toggle') {
-      const spinner = ora(`${sub === 'toggle' ? 'Toggling' : sub === 'show' ? 'Showing' : 'Hiding'} Persona window...`).start();
+      const spinner = ora(`${sub === 'toggle' ? 'Toggling' : sub === 'show' ? 'Showing' : 'Hiding'} awdesk window...`).start();
       try {
         await personaWindowAction(sub as 'show' | 'hide' | 'toggle');
-        spinner.succeed(`Persona window ${sub === 'hide' ? 'hidden' : sub === 'show' ? 'visible' : 'toggled'}`);
+        spinner.succeed(`awdesk window ${sub === 'hide' ? 'hidden' : sub === 'show' ? 'visible' : 'toggled'}`);
       } catch (err: any) {
         spinner.fail(`Failed to ${sub} window`);
         console.log(chalk.red(`  ${err?.message || err}`));
@@ -8514,7 +8579,7 @@ COMMANDS['persona'] = {
     if (sub === 'list' || sub === 'ls') {
       const spinner = ora('Reading character roster...').start();
       try {
-        const status = await getPersonaStatus();
+        const status = await getAwdeskStatus();
         spinner.stop();
         const chars = status.characters ?? [];
         if (!chars.length) {
@@ -8525,7 +8590,7 @@ COMMANDS['persona'] = {
         for (const c of chars) {
           console.log(c === status.active ? chalk.green(`  ● ${c}`) : `  ${chalk.dim('○')} ${c}`);
         }
-        console.log(chalk.dim('\n  Switch with /persona <name>\n'));
+        console.log(chalk.dim('\n  Switch with /desk <name>\n'));
       } catch (err: any) {
         spinner.fail('Failed to list characters');
         console.log(chalk.red(`  ${err?.message || err}\n`));
@@ -8536,13 +8601,13 @@ COMMANDS['persona'] = {
     if (sub === 'anims' || sub === 'animations') {
       const spinner = ora('Reading installed animations...').start();
       try {
-        const anims = await listPersonaAnimations();
+        const anims = await listAwdeskAnimations();
         spinner.stop();
         console.log(chalk.bold(`\n  ${anims.length} animation${anims.length === 1 ? '' : 's'}\n`));
         for (const a of anims) {
           console.log(a.startsWith('FILE:') ? `  ${chalk.magenta('◆')} ${a}` : `  ${chalk.cyan('•')} ${a}`);
         }
-        console.log(chalk.dim('\n  Play one with /persona anim <name>\n'));
+        console.log(chalk.dim('\n  Play one with /desk anim <name>\n'));
       } catch (err: any) {
         spinner.fail('Failed to list animations');
         console.log(chalk.red(`  ${err?.message || err}\n`));
@@ -8553,12 +8618,12 @@ COMMANDS['persona'] = {
     if (sub.startsWith('anim ') || sub === 'anim') {
       const name = args.trim().slice(4).trim();   // slice off "anim", keep the ORIGINAL case
       if (!name) {
-        console.log(chalk.yellow('\n  Usage: /persona anim <name>   ·   /persona anims to list\n'));
+        console.log(chalk.yellow('\n  Usage: /desk anim <name>   ·   /desk anims to list\n'));
         return;
       }
       const spinner = ora(`Playing ${name}...`).start();
       try {
-        const played = await playPersonaAnimation(name);
+        const played = await playAwdeskAnimation(name);
         spinner.succeed(`Played ${chalk.cyan(played)}`);
       } catch (err: any) {
         spinner.fail('Animation not played');
@@ -8570,19 +8635,19 @@ COMMANDS['persona'] = {
     if (sub === 'agents') {
       const spinner = ora('Reading agent avatar assignments...').start();
       try {
-        const map = await listPersonaAgentAvatars();
+        const map = await listAwdeskAgentAvatars();
         spinner.stop();
         const entries = Object.entries(map);
         if (!entries.length) {
           console.log(chalk.yellow('\n  No agent has an avatar assigned yet.'));
-          console.log(chalk.dim('  Assign one in Persona: Characters > Agents.\n'));
+          console.log(chalk.dim('  Assign one in awdesk: Characters > Agents.\n'));
           return;
         }
         console.log(chalk.bold('\n  Agent avatars\n'));
         for (const [agent, character] of entries) {
           console.log(`  ${chalk.cyan(agent.padEnd(12))} ${character}`);
         }
-        console.log(chalk.dim('\n  Show one with /persona agent <name>\n'));
+        console.log(chalk.dim('\n  Show one with /desk agent <name>\n'));
       } catch (err: any) {
         spinner.fail('Failed to read assignments');
         console.log(chalk.red(`  ${err?.message || err}\n`));
@@ -8593,18 +8658,18 @@ COMMANDS['persona'] = {
     if (sub.startsWith('agent ') || sub === 'agent') {
       const name = args.trim().slice(5).trim();
       if (!name) {
-        console.log(chalk.yellow('\n  Usage: /persona agent <name>   ·   /persona agents to list\n'));
+        console.log(chalk.yellow('\n  Usage: /desk agent <name>   ·   /desk agents to list\n'));
         return;
       }
       const spinner = ora(`Showing ${name}'s avatar...`).start();
       try {
-        const character = await setPersonaAgent(name);
-        if (character) spinner.succeed(`Persona is showing ${chalk.cyan(name)} (${character})`);
+        const character = await setAwdeskAgent(name);
+        if (character) spinner.succeed(`awdesk is showing ${chalk.cyan(name)} (${character})`);
         else {
           // NOT an error — the agent simply has no assignment, and saying "failed" would
           // send the user looking for a broken feature instead of an empty setting.
           spinner.warn(`No avatar assigned to ${name}`);
-          console.log(chalk.dim('  Assign one in Persona: Characters > Agents.\n'));
+          console.log(chalk.dim('  Assign one in awdesk: Characters > Agents.\n'));
         }
       } catch (err: any) {
         spinner.fail('Failed to switch avatar');
@@ -8616,7 +8681,7 @@ COMMANDS['persona'] = {
     if (sub === 'export') {
       const spinner = ora('Rendering this character into AitherShell portrait frames...').start();
       try {
-        const result = await exportPersonaToShell();
+        const result = await exportAwdeskToShell();
         spinner.succeed('Exported to AitherShell');
         const idle = result.idleFrames ?? result.frames;
         const talk = result.talkFrames;
@@ -8635,13 +8700,62 @@ COMMANDS['persona'] = {
     const charName = sub;
     const spinner = ora(`Switching to character: ${charName}...`).start();
     try {
-      await setPersonaCharacter(charName);
+      await setAwdeskCharacter(charName);
       spinner.succeed(`Switched to ${chalk.cyan(charName)}`);
     } catch (err: any) {
       spinner.fail('Failed to switch character');
       console.log(chalk.red(`  ${err?.message || err}`));
-      console.log(chalk.dim(`  Run /persona status to see available characters`));
+      console.log(chalk.dim(`  Run /desk status to see available characters`));
     }
+  },
+};
+// Alias: the command was `/persona` for its first months; keep the old spelling
+// working so a muscle-memory `/persona show` is not a silent 'unknown command'.
+COMMANDS['persona'] = COMMANDS['desk'];
+
+// ── Briefs — the executive-brief delivery plane ──
+
+COMMANDS['briefs'] = {
+  description: 'List and read executive briefs (session closing summaries)',
+  usage: '/briefs [show <session-id>]',
+  handler: async (_client, args) => {
+    const briefsDir = join(homedir(), '.aither', 'briefs');
+    const indexFile = join(briefsDir, 'index.json');
+    const parts = args.trim().split(/\s+/);
+    const sub = parts[0] || '';
+    if (sub === 'show' && parts[1]) {
+      const md = join(briefsDir, `${parts[1]}.md`);
+      if (!existsSync(md)) {
+        console.log(chalk.yellow(`  No brief recorded for ${parts[1]}.`));
+        return;
+      }
+      console.log();
+      console.log(readFileSync(md, 'utf-8'));
+      return;
+    }
+    if (!existsSync(indexFile)) {
+      console.log(chalk.yellow('  No briefs recorded yet.'));
+      return;
+    }
+    let index: Record<string, any>;
+    try {
+      index = JSON.parse(readFileSync(indexFile, 'utf-8'));
+    } catch {
+      console.log(chalk.yellow(`  Brief index unreadable at ${indexFile}.`));
+      return;
+    }
+    const rows = Object.entries(index)
+      .sort(([, a], [, b]) => String(b.created).localeCompare(String(a.created)))
+      .slice(0, 20)
+      .map(([id, e]: [string, any]) => [
+        id.slice(0, 8),
+        String(e.created || '—').slice(0, 16),
+        e.surfaces?.notebook?.id || '—',
+        e.surfaces?.discord?.card || '—',
+      ]);
+    console.log();
+    console.log(formatTable(['  Session', 'Created', 'Notebook', 'Discord'], rows));
+    console.log(chalk.dim('  /briefs show <session-id> — read one brief in full'));
   },
 };
 

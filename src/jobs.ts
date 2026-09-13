@@ -15,6 +15,7 @@
  */
 
 import chalk from 'chalk';
+import { stripFenceDelimiters } from './tui/chat-formatter.js';
 import type { GenesisClient, SSEEvent, StreamChatOpts } from './client.js';
 
 /** Server-backed expedition (durable job). */
@@ -508,7 +509,11 @@ export function formatJobOutput(job: Job): string {
   }
   if (job.output.length > 0) {
     lines.push('');
-    const outputLines = job.output.join('\n').split('\n');
+    // A job whose output carries a fenced block is the common case (`/jobs`
+    // after a command-generating turn), and the delimiters are not output --
+    // they are markdown the model wrote for a renderer this path does not have.
+    // Drop them wherever they sit, keep every other line verbatim.
+    const outputLines = stripFenceDelimiters(job.output.join('\n')).split('\n');
     for (const line of outputLines) {
       lines.push(`  ${line}`);
     }

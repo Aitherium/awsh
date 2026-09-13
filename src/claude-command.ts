@@ -117,9 +117,11 @@ export function validateClaudeArgs(p: ClaudeArgs): string {
  */
 export function internalSecretHint(env: NodeJS.ProcessEnv = process.env): string {
   if (env.AITHER_INTERNAL_SECRET || env.AITHER_CLAUDE_RUNNER_TOKEN) return '';
-  return 'AITHER_INTERNAL_SECRET is not set in this shell — the runner may 401. '
-    + 'Source it the way the runner does: C:\\Users\\wzns\\.aither\\bin\\claude-runner-wrapper.ps1 '
-    + 'reads it from .DEPLOYMENT/.env (falls back to ~/.aither/claude-runner/token if present).';
+  return 'AITHER_INTERNAL_SECRET is not set in this shell; the runner\'s own bearer '
+    + 'will be used (the daemon syncs it to ~/.aither/claude-runner/token on start). '
+    + 'If a 403 follows, the runner has not started since the secret last changed — '
+    + 'restart it, or export AITHER_INTERNAL_SECRET (the runner reads it from the '
+    + 'repo-root .env).';
 }
 
 /** Python launcher: AITHER_PYTHON wins, else `python` on Windows, `python3` elsewhere. */

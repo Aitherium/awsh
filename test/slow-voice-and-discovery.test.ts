@@ -72,8 +72,10 @@ describe('docker discovery drives the probe set', () => {
     'aitheros-node\tUp 20 minutes (healthy)\t127.0.0.1:8490->8090/tcp',
     'aitheros-genesis-lb\tUp 2 hours (healthy)\t127.0.0.1:8001->8001/tcp',
     'aitheros-security-core-lb\tUp 2 hours (healthy)\t127.0.0.1:8115->8115/tcp',
-    // Running but publishes NOTHING reachable from the host (the ComfyUI case).
-    'aither-comfyui-dgx-worker\tUp 2 hours (healthy)\t',
+    // Running but publishes NOTHING reachable from the host. The fixture name is
+    // a neutral placeholder: this test SHIPS, and the moat rule (AWS007) is that a
+    // published package must not name what our fleet runs. The parser does not care.
+    'some-gpu-worker\tUp 2 hours (healthy)\t',
     'aitheros-pulse\tUp 2 hours (unhealthy)\t127.0.0.1:8081->8081/tcp',
     'aitheros-secrets\tExited (0) 5 minutes ago\t',
   ].join('\n');
@@ -83,7 +85,7 @@ describe('docker discovery drives the probe set', () => {
     assert.equal(m.get('aitheros-node')?.hostPort, '8490');   // NOT 8090
     assert.equal(m.get('aitheros-node')?.running, true);
     assert.equal(m.get('aitheros-node')?.health, 'healthy');
-    assert.equal(m.get('aither-comfyui-dgx-worker')?.hostPort, undefined);
+    assert.equal(m.get('some-gpu-worker')?.hostPort, undefined);
     assert.equal(m.get('aitheros-pulse')?.health, 'unhealthy');
     assert.equal(m.get('aitheros-secrets')?.running, false);
   });

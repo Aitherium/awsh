@@ -1,183 +1,67 @@
 {
   "commands": [
     {
-      "name": "help",
-      "category": "shell",
-      "description": "Show available commands",
+      "name": "artifacts",
+      "category": "core",
+      "description": "List all artifacts produced in this session",
       "aliases": []
     },
     {
-      "name": "connect",
+      "name": "briefs",
       "category": "shell",
-      "description": "Open a remote terminal into a prod/dev environment via tunnel.aitherium.com (Ctrl-Q to detach)",
+      "description": "List and read executive briefs (session closing summaries)",
       "aliases": [
-        "ssh"
+        "b"
       ]
     },
     {
-      "name": "view",
-      "category": "shell",
-      "description": "View a file (markdown/code/text rendered; PNG images inline)",
+      "name": "calendar",
+      "category": "core",
+      "description": "Manage calendar events",
       "aliases": [
-        "open",
-        "cat"
+        "cal"
       ]
     },
     {
-      "name": "edit",
-      "category": "shell",
-      "description": "Edit a file in the in-shell editor (save ^S, quit ^Q)",
-      "aliases": [
-        "e",
-        "nano"
-      ]
-    },
-    {
-      "name": "status",
-      "category": "system",
-      "description": "Show system status",
-      "aliases": [
-        "st"
-      ]
-    },
-    {
-      "name": "agents",
-      "category": "system",
-      "description": "List registered agents",
+      "name": "cd",
+      "category": "core",
+      "description": "Change working directory (set project path)",
       "aliases": []
     },
     {
-      "name": "services",
-      "category": "system",
-      "description": "List running services with health",
-      "aliases": [
-        "svc"
-      ]
+      "name": "claude",
+      "category": "core",
+      "description": "Hand a task to a scoped Claude Code subagent (adk runner)",
+      "aliases": []
     },
     {
-      "name": "forge",
+      "name": "compose",
       "category": "agents",
-      "description": "Dispatch a task to an agent via Forge",
+      "description": "Compose a new custom agent interactively",
       "aliases": [
-        "f"
+        "agent-new"
       ]
     },
     {
-      "name": "logs",
-      "category": "system",
-      "description": "Show recent log entries from Chronicle",
-      "aliases": []
-    },
-    {
-      "name": "model",
-      "category": "llm",
-      "description": "Show or set the LLM model",
-      "aliases": []
-    },
-    {
-      "name": "clear",
-      "category": "shell",
-      "description": "Clear the terminal",
-      "aliases": [
-        "cls"
-      ]
-    },
-    {
-      "name": "memory",
-      "category": "memory",
-      "description": "Query or store memory",
-      "aliases": [
-        "mem"
-      ]
-    },
-    {
-      "name": "search",
-      "category": "search",
-      "description": "Unified search across code, docs, and web",
-      "aliases": [
-        "s"
-      ]
-    },
-    {
-      "name": "context",
-      "category": "context",
-      "description": "Show context layers and dashboard",
-      "aliases": [
-        "ctx"
-      ]
-    },
-    {
-      "name": "swarm",
-      "category": "agents",
-      "description": "Dispatch task to swarm coding engine",
-      "aliases": []
-    },
-    {
-      "name": "tools",
-      "category": "system",
-      "description": "List available MCP tools",
-      "aliases": []
-    },
-    {
-      "name": "codegraph",
-      "category": "search",
-      "description": "Search code via CodeGraph",
-      "aliases": [
-        "cg"
-      ]
-    },
-    {
-      "name": "deploy",
+      "name": "compute",
       "category": "ops",
-      "description": "Deploy a service",
-      "aliases": []
-    },
-    {
-      "name": "git",
-      "category": "git",
-      "description": "Git status, diff, commit",
-      "aliases": []
-    },
-    {
-      "name": "github",
-      "category": "git",
-      "description": "GitHub issues and PRs",
+      "description": "Manage federated compute fabric (discover/backends/nodes/scale/status)",
       "aliases": [
-        "gh"
+        "fabric"
       ]
     },
     {
-      "name": "recall",
-      "category": "memory",
-      "description": "Recall past decisions and context",
-      "aliases": []
-    },
-    {
-      "name": "soul",
-      "category": "personality",
-      "description": "Load or list personality souls",
-      "aliases": []
-    },
-    {
-      "name": "config",
-      "category": "shell",
-      "description": "Shell configuration",
+      "name": "desk",
+      "category": "core",
+      "description": "Control the awdesk desktop overlay (avatar, tray, decision cards)",
       "aliases": [
-        "cfg"
+        "persona"
       ]
     },
     {
-      "name": "benchmark",
-      "category": "llm",
-      "description": "Run or view model benchmarks",
-      "aliases": [
-        "bench"
-      ]
-    },
-    {
-      "name": "sessions",
-      "category": "shell",
-      "description": "List or resume past sessions",
+      "name": "dev",
+      "category": "core",
+      "description": "Manage dev environments (sandbox + AI agent)",
       "aliases": []
     },
     {
@@ -247,8 +131,16 @@
     {
       "name": "fleet",
       "category": "ops",
-      "description": "Manage GPU fleet",
+      "description": "Control the LLM fleet (quiesce, resume, adopt, gaming mode)",
       "aliases": []
+    },
+    {
+      "name": "command",
+      "category": "ops",
+      "description": "Send a command to the desk Command agent and print its reply",
+      "aliases": [
+        "do"
+      ]
     },
     {
       "name": "node",
@@ -385,41 +277,76 @@
     {
       "name": "docker",
       "category": "ops",
-      "description": "Manage Docker containers (up/down/status/build/restart/logs/ps)",
+      "description": "Manage Docker containers (up/down/status/build/restart/logs/ps/recover)",
       "aliases": [
         "dc"
       ]
     },
     {
-      "name": "notebook",
-      "category": "agents",
-      "description": "Create, run, or list agent notebooks",
-      "aliases": [
-        "nb"
-      ]
+      "name": "escalate",
+      "category": "core",
+      "description": "Manage escalation proposals and config",
+      "aliases": []
     },
     {
-      "name": "products",
+      "name": "feedback",
+      "category": "core",
+      "description": "Submit feedback on your agent experience",
+      "aliases": []
+    },
+    {
+      "name": "fleet",
       "category": "ops",
-      "description": "Manage standalone product instances (deploy/list/status/destroy)",
+      "description": "Fleet refresh \u2014 rebuild all lib-baking Python images + safe rolling recreate",
+      "aliases": []
+    },
+    {
+      "name": "get",
+      "category": "core",
+      "description": "Download an artifact by number or \"all\" (from /artifacts list)",
+      "aliases": []
+    },
+    {
+      "name": "ide",
+      "category": "core",
+      "description": "Open ForgeIDE in browser (optionally for a sandbox session)",
+      "aliases": []
+    },
+    {
+      "name": "imagine",
+      "category": "core",
+      "description": "",
       "aliases": [
-        "prod"
+        "draw",
+        "gen"
       ]
     },
     {
-      "name": "tool-scope",
+      "name": "ingest",
+      "category": "core",
+      "description": "Universal ingestion \u2014 ingest a URL or file into any agent",
+      "aliases": []
+    },
+    {
+      "name": "install",
+      "category": "core",
+      "description": "Full AitherOS sovereign install \u2014 auth, Docker, pull, boot, extensions",
+      "aliases": []
+    },
+    {
+      "name": "lockbox",
       "category": "security",
-      "description": "View or modify workspace tool access (allow/deny)",
+      "description": "Manage private prompts stored in Strata lockbox",
       "aliases": [
-        "scope"
+        "lb"
       ]
     },
     {
-      "name": "compose",
-      "category": "agents",
-      "description": "Compose a new agent (identity + tools + reasoning + deploy)",
+      "name": "mail",
+      "category": "core",
+      "description": "Manage email inbox and sending",
       "aliases": [
-        "agent-new"
+        "email"
       ]
     },
     {
@@ -431,26 +358,130 @@
       ]
     },
     {
-      "name": "compute",
-      "category": "ops",
-      "description": "Discover and manage compute fabric (backends/nodes/scale)",
+      "name": "notebook",
+      "category": "agents",
+      "description": "Create, run, or list agent notebooks",
       "aliases": [
-        "fabric"
+        "nb"
       ]
     },
     {
-      "name": "storage",
+      "name": "obsidian",
+      "category": "core",
+      "description": "Install or link the AitherOS Obsidian plugin into a vault",
+      "aliases": []
+    },
+    {
+      "name": "onboard",
+      "category": "core",
+      "description": "Unified onboarding for codebases, repos, and knowledge directories",
+      "aliases": []
+    },
+    {
+      "name": "pool",
+      "category": "core",
+      "description": "LLM pool management \u2014 check status or reset stuck slots",
+      "aliases": []
+    },
+    {
+      "name": "preview",
+      "category": "core",
+      "description": "List active preview containers or open one in browser",
+      "aliases": []
+    },
+    {
+      "name": "products",
       "category": "ops",
+      "description": "Manage standalone product instances",
+      "aliases": [
+        "prod"
+      ]
+    },
+    {
+      "name": "publish",
+      "category": "core",
+      "description": "Publish content via Vera (blog, social)",
+      "aliases": []
+    },
+    {
+      "name": "report-bug",
+      "category": "core",
+      "description": "Report a bug with structured details",
+      "aliases": [
+        "bug"
+      ]
+    },
+    {
+      "name": "research",
+      "category": "core",
+      "description": "Launch a research task via Lyra (Forge dispatch)",
+      "aliases": []
+    },
+    {
+      "name": "resume",
+      "category": "shell",
+      "description": "Reopen the coding sessions you had open, on a backend you choose",
+      "aliases": [
+        "resume-all"
+      ]
+    },
+    {
+      "name": "sandbox",
+      "category": "core",
+      "description": "Manage sandbox sessions (list, create, stop, exec)",
+      "aliases": []
+    },
+    {
+      "name": "scaffold",
+      "category": "products",
+      "description": "Scaffold a new product and deploy it to a subdomain (init, deploy, list)",
+      "aliases": []
+    },
+    {
+      "name": "scope",
+      "category": "core",
+      "description": "AitherScope \u2014 codebase visualization and analysis",
+      "aliases": []
+    },
+    {
+      "name": "sessions",
+      "category": "shell",
+      "description": "List or inspect saved session traces",
+      "aliases": []
+    },
+    {
+      "name": "storage",
+      "category": "core",
       "description": "Storage inventory: nodes, drives, diff, proposals, ledger, policy",
       "aliases": []
     },
     {
-      "name": "publish-preflight",
-      "category": "dev",
-      "description": "Check a package can actually publish, before anything is uploaded",
+      "name": "support",
+      "category": "core",
+      "description": "Open support page or show support options",
+      "aliases": []
+    },
+    {
+      "name": "tool-scope",
+      "category": "security",
+      "description": "View or modify workspace tool scoping",
       "aliases": [
-        "preflight"
+        "scope"
       ]
+    },
+    {
+      "name": "will",
+      "category": "core",
+      "description": "Manage Will policies (autonomous behavior directives)",
+      "aliases": []
+    },
+    {
+      "name": "workspace",
+      "category": "core",
+      "description": "Manage workspaces and project contexts",
+      "aliases": []
     }
-  ]
+  ],
+  "_generated": "DO NOT EDIT BY HAND. Regenerate with: python AitherOS/dev/tools/check_shell_command_roster.py --write",
+  "_why": "Offline fallback roster: exactly the built-in handlers in src/commands.ts. Genesis and MCP commands are discovered at runtime by loadDynamicCommands(); listing them here would advertise availability that does not exist offline."
 }

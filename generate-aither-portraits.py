@@ -17,7 +17,7 @@ ctx.check_hostname = False
 ctx.verify_mode = ssl.CERT_NONE
 
 COMFYUI_URL = "https://localhost:8188"
-PORTRAIT_DIR = Path(r"D:\AitherOS-Fresh\.PRODUCTS\.AITHERSHELL\cli\assets\aither-portrait")
+PORTRAIT_DIR = Path(r"C:\AitherOS-Fresh\.PRODUCTS\.AITHERSHELL\cli\assets\aither-portrait")
 CHECKPOINT = "waiIllustriousSDXL_v140.safetensors"
 
 # Base prompt: consistent character across all variations

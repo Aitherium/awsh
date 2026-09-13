@@ -6,6 +6,11 @@
  * notes:". marked handed that line to highlight.js as a LANGUAGE, which logged
  * `Could not find the language 'A few practical notes:'` and mangled the
  * re-render. Unclosed fences also swallowed the rest of the message as code.
+ *
+ * Ported from the public mirror, where this was fixed first and lived ONLY on
+ * the mirror. The sync lane mirrors cli/** destructively (a keep-list wipe), so
+ * a fix that exists only on the mirror is a fix the next sync deletes -- hence
+ * the tests travelling with the code.
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';

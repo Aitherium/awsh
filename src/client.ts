@@ -4,7 +4,7 @@
  *
  * Works against any AitherOS-compatible backend:
  *   - Genesis (full AitherOS stack)
- *   - ADK server (standalone agent via `adk serve`)
+ *   - ADK server (standalone agent via the `adk-serve` console script)
  *   - Any server implementing /chat/stream SSE protocol
  *
  * Chat routing is handled by the backend's /chat/stream endpoint.

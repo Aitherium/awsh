@@ -16,6 +16,7 @@ import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import chalk from 'chalk';
+import { stripFenceDelimiters } from './chat-formatter.js';
 import type { GenesisClient } from '../client.js';
 import type { ClarificationResponse } from '../client.js';
 import type { ShellConfig } from '../config.js';
@@ -26,7 +27,7 @@ import {
   loadAgentNames, resolveAgentMention, completer, refreshCommandCompletions, SUBCOMMAND_DEFS,
 } from '../completions.js';
 import { collectArgs } from '../interactive.js';
-import { personaEmotion, personaIdle, personaLevel, personaSpeaking } from '../persona-bridge.js';
+import { personaEmotion, personaIdle, personaLevel, personaSpeaking } from '../awdesk-bridge.js';
 import { gatherStatus, formatStatusLines, formatStatusBar, formatWelcomeHeader, type StatusInfo } from '../status-banner.js';
 import {
   setJobNotifier, listJobs, getJob, cancelJob, runningCount,
@@ -767,7 +768,7 @@ export async function startTuiRepl(client: GenesisClient, config: ShellConfig): 
     if (job.status === 'completed' && job.output.length) {
       const sepIdx = job.output.indexOf('---');
       const lines = sepIdx >= 0 ? job.output.slice(sepIdx + 1) : job.output.filter(l => !l.startsWith('['));
-      const text = lines.join('\n').trim();
+      const text = stripFenceDelimiters(lines.join('\n')).trim();
       if (text) {
         if (text.length <= 800) surface.outputLine(chalk.dim(text));
         else surface.outputLine(chalk.dim(text.split('\n').slice(0, 6).join('\n') + `\n  … (/jobs ${job.id} for full)`));

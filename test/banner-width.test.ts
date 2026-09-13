@@ -34,7 +34,7 @@ function visible(s: string): number {
 
 /** Render the banner at a given terminal width and return its plain lines.
  *
- * D-2170: used to fake the width by overriding process.stdout.columns via
+ * Lesson: this used to fake the width by overriding process.stdout.columns via
  * Object.defineProperty. That passed 100% locally (Node 25, and Node 22
  * via fnm — both piped/non-TTY, no existing descriptor to fight) and still
  * failed on the actual GitHub Actions runner, most likely because a

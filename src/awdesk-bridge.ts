@@ -1,23 +1,49 @@
-/** Mirror AitherShell's avatar state onto the Persona desktop VRM overlay (D:\persona).
+/** Mirror AitherShell's avatar state onto the awdesk desktop overlay (D:\desk; formerly
+ * Persona -- renamed 2026-09-06, owner decision, `.claude/skills/awdesk-avatar`).
  *
- * Persona listens on 127.0.0.1:47831 (see .RESEARCH/INTAKE/persona/DOSSIER.md). The
+ * awdesk listens on 127.0.0.1:47931 by default (47831 fell inside a Windows reserved TCP
+ * range). The aitheros launcher publishes the port it ACTUALLY bound via
+ * AITHERSHELL_AWDESK_URL, so never assume the default. The
  * fire-and-forget `/events` calls have a short timeout: if Persona is not installed or not
  * running, the shell behaves exactly as before — no errors, no latency (failures latch a
  * cooldown so a dead endpoint is not re-probed on every token). The `/mcp` calls behind the
- * `/persona` command are request/response and DO surface their errors, because a silent
- * failure there reads as "the feature does nothing". Disable with AITHERSHELL_PERSONA=0.
+ * `/desk` command are request/response and DO surface their errors, because a silent
+ * failure there reads as "the feature does nothing". Disable with AITHERSHELL_AWDESK=0
+ * (the pre-rename AITHERSHELL_PERSONA* names are still read as a fallback for one release).
  *
  * Two vocabularies, deliberately: `/events` takes UPPERCASE names (FINGER_GUN) and the MCP
  * tool schema takes lowercase-hyphenated ones (finger-gun). normalizeAnimationName is the
  * only place that conversion lives.
  */
 
-const PERSONA_URL =
-  process.env.AITHERSHELL_PERSONA_URL || 'http://127.0.0.1:47831/events';
+import { daemonToken } from './harness-client.js';
+
+/** Mutating bridge routes (POST /fleet/<verb>, POST /command) require the awdk daemon's
+ *  bearer since 2026-09-08 -- Host+Origin alone let any local process stop the fleet.
+ *  Same resolution as the daemon: AITHER_HARNESS_TOKEN, else ~/.aither/harness_token. */
+function bridgeAuthHeaders(): Record<string, string> {
+  const token = daemonToken();
+  return token ? { authorization: `Bearer ${token}` } : {};
+}
+
+function explainDenied(status: number, what: string): Error {
+  if (status === 401) {
+    return new Error(
+      `${what} refused: awdesk wants the harness bearer (set AITHER_HARNESS_TOKEN or start the adk daemon once so ~/.aither/harness_token exists)`,
+    );
+  }
+  if (status === 503) {
+    return new Error(`${what} refused: awdesk has no bridge token configured (HTTP 503)`);
+  }
+  return new Error(`${what} failed: HTTP ${status}`);
+}
+
+const EVENTS_URL_ENV = process.env.AITHERSHELL_AWDESK_URL || process.env.AITHERSHELL_PERSONA_URL;
+const PERSONA_URL = EVENTS_URL_ENV || 'http://127.0.0.1:47931/events';
 const PERSONA_BASE =
-  process.env.AITHERSHELL_PERSONA_URL?.replace(/\/events$/, '') || 'http://127.0.0.1:47831';
+  EVENTS_URL_ENV?.replace(/\/events$/, '') || 'http://127.0.0.1:47931';
 const PERSONA_MCP_URL = `${PERSONA_BASE}/mcp`;
-const ENABLED = process.env.AITHERSHELL_PERSONA !== '0';
+const ENABLED = (process.env.AITHERSHELL_AWDESK ?? process.env.AITHERSHELL_PERSONA) !== '0';
 const RETRY_COOLDOWN_MS = 30_000;
 
 let deadUntil = 0;
@@ -133,7 +159,7 @@ export function personaEmotion(emotion: string): void {
   post({ type: 'animation', animation: EMOTION_ANIMATION[emotion] ?? 'IDLE' });
 }
 
-// ── Persona Command Support (for /persona CLI command) ────────────────────
+// ── awdesk command support (for the /desk CLI command; /persona is an alias) ────────────────────
 
 /** Check if Persona is running and responding to health checks. */
 export async function personaHealthy(): Promise<boolean> {
@@ -244,8 +270,8 @@ export function normalizeCharacterList(
   return { active: null, characters: [] };
 }
 
-/** Get Persona status and available characters. */
-export async function getPersonaStatus(): Promise<{
+/** Get awdesk status and available characters. */
+export async function getAwdeskStatus(): Promise<{
   running: boolean;
   status?: Record<string, any>;
   characters?: string[];
@@ -279,8 +305,8 @@ async function requireRunning(): Promise<void> {
   if (!(await personaHealthy())) throw new Error('Persona is not running');
 }
 
-/** Set Persona's displayed character. */
-export async function setPersonaCharacter(name: string): Promise<void> {
+/** Set awdesk's displayed character. */
+export async function setAwdeskCharacter(name: string): Promise<void> {
   await requireRunning();
   await callPersonaMcpTool('set_character', { name });
 }
@@ -292,7 +318,7 @@ export async function personaWindowAction(action: 'show' | 'hide' | 'toggle'): P
 }
 
 /** Play one clip. Rejects an unknown name CLIENT-side — see isValidAnimation. */
-export async function playPersonaAnimation(name: string): Promise<string> {
+export async function playAwdeskAnimation(name: string): Promise<string> {
   const animation = normalizeAnimationName(name);
   if (!isValidAnimation(animation)) {
     throw new Error(
@@ -308,7 +334,7 @@ export async function playPersonaAnimation(name: string): Promise<string> {
 }
 
 /** Every clip play_animation can play: the built-ins plus installed .vrma packs. */
-export async function listPersonaAnimations(): Promise<string[]> {
+export async function listAwdeskAnimations(): Promise<string[]> {
   await requireRunning();
   try {
     return mergeAnimationList(toolJson(await callPersonaMcpTool('list_animations')));
@@ -320,7 +346,7 @@ export async function listPersonaAnimations(): Promise<string[]> {
 
 /** Switch the window to the character assigned to an agent. Returns that character, or
  *  null when the agent has no assignment (which is NOT an error — it is a thing to fix). */
-export async function setPersonaAgent(agent: string): Promise<string | null> {
+export async function setAwdeskAgent(agent: string): Promise<string | null> {
   await requireRunning();
   const result = await callPersonaMcpTool('set_agent', { agent });
   const text = result?.content?.[0]?.text;
@@ -330,7 +356,7 @@ export async function setPersonaAgent(agent: string): Promise<string | null> {
 }
 
 /** Read which character each agent is assigned to. */
-export async function listPersonaAgentAvatars(): Promise<Record<string, string>> {
+export async function listAwdeskAgentAvatars(): Promise<Record<string, string>> {
   await requireRunning();
   const parsed = toolJson(await callPersonaMcpTool('list_agent_avatars'));
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
@@ -343,10 +369,137 @@ export async function listPersonaAgentAvatars(): Promise<Record<string, string>>
 
 /** Render the live 3D character into AitherShell portrait frames. Returns whatever the
  *  exporter reported (frame counts / output dir) so the caller can prove it wrote. */
-export async function exportPersonaToShell(): Promise<Record<string, any>> {
+export async function exportAwdeskToShell(): Promise<Record<string, any>> {
   await requireRunning();
   const result = await callPersonaMcpTool('export_to_aithershell');
   const refused = toolError(result);
   if (refused) throw new Error(refused);
   return toolJson(result) || {};
+}
+
+// ── Fleet Control (the LLM orchestrator's quiesce/resume/adopt planes) ─────────────────
+
+/** Get fleet status from the desk bridge. Returns the status object or throws. */
+export async function fleetStatus(fresh?: boolean): Promise<Record<string, any>> {
+  const url = `${PERSONA_BASE}/fleet/status${fresh ? '?fresh=1' : ''}`;
+  const resp = await fetch(url, {
+    signal: AbortSignal.timeout(90_000),
+  });
+
+  if (!resp.ok) {
+    throw new Error(`Fleet status failed: HTTP ${resp.status}`);
+  }
+
+  const text = await resp.text();
+  return JSON.parse(text);
+}
+
+/** The pill word, derived from reality (counts + masks), same rule as the desk and adk. */
+export function classifyFleet(status: Record<string, any> | null | undefined): string {
+  if (!status || status.cannotJudge) return 'UNKNOWN';
+  const fl = status.fleet || {};
+  if (fl.running === 0 && (fl.masked ?? 0) > 0) return 'DOWN';
+  if (status.held) return 'GPU QUIET';
+  if ((fl.masked ?? 0) > 0) return 'MIXED';
+  if ((fl.running ?? 0) > 0) return 'UP';
+  return 'UNKNOWN';
+}
+
+/** One line from a fleet verdict — counts, GPU + who holds it, HOLD, doors.
+ *  The bridge attaches `gpu_holders` (Windows counters) and `surfaces` (probed
+ *  doors) to every status; this prints them the way adk's summary does, so
+ *  awsh, adk and the desk tooltip read the same sentence. */
+export function summarizeFleet(status: Record<string, any> | null | undefined): string {
+  if (!status || status.cannotJudge) return `CANNOT JUDGE — ${status?.error || 'no verdict'}`;
+  const fl = status.fleet || {};
+  const v = status.vram;
+  let gpu = v && v.total_mib ? `GPU ${(v.used_mib / 1024).toFixed(1)}/${(v.total_mib / 1024).toFixed(0)} GiB` : 'GPU ?';
+  const holders = (Array.isArray(status.gpu_holders) ? status.gpu_holders : []).slice(0, 2);
+  if (holders.length) {
+    gpu += ' (' + holders.map((h: any) => `${/ComfyUI/.test(String(h.hint || '')) ? 'ComfyUI' : h.name} ${Number(h.gib || 0).toFixed(1)}`).join(', ') + ')';
+  }
+  const surfaces = Array.isArray(status.surfaces) ? status.surfaces : [];
+  const down = surfaces.filter((s: any) => !s.up).map((s: any) => s.id);
+  const doors = surfaces.length ? `, doors ${surfaces.length - down.length}/${surfaces.length} up${down.length ? ` (down: ${down.join(', ')})` : ''}` : '';
+  return `${classifyFleet(status)} — ${fl.running ?? '?'} container(s) running, ${fl.masked ?? '?'}/${fl.units ?? '?'} units masked, ${gpu}, HOLD ${status.held ? 'yes' : 'no'}${fl.scope ? `, scope=${fl.scope}` : ''}${doors}`;
+}
+
+// ── Desktop surfaces (overlay over Windows / the AitherDesktop app) ────────────────
+
+/** Raise one of awdesk's desktop surfaces, or read which are open. No bearer:
+ *  it raises a window on the owner's own screen (same class as /fleet/open). */
+export async function deskDesktop(surface: 'overlay' | 'app' | 'status'): Promise<Record<string, any>> {
+  const url = `${PERSONA_BASE}/desktop/${surface}`;
+  const resp = await fetch(url, {
+    method: surface === 'status' ? 'GET' : 'POST',
+    signal: AbortSignal.timeout(10_000),
+  });
+  if (!resp.ok) {
+    throw new Error(resp.status === 404
+      ? 'this awdesk has no /desktop routes (older build) — update Desk'
+      : `Desktop '${surface}' failed: HTTP ${resp.status}`);
+  }
+  const text = await resp.text();
+  return text ? JSON.parse(text) : {};
+}
+
+/** Control the fleet: send an action (down, up, gaming, resume, adopt, etc).
+ *  Returns the result object or throws. */
+export async function fleetControl(action: string): Promise<Record<string, any>> {
+  const url = `${PERSONA_BASE}/fleet/${encodeURIComponent(action)}`;
+  const resp = await fetch(url, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', ...bridgeAuthHeaders() },
+    body: JSON.stringify({}),
+    signal: AbortSignal.timeout(30 * 60 * 1000), // 30 minutes
+  });
+
+  if (!resp.ok) {
+    throw explainDenied(resp.status, `Fleet control '${action}'`);
+  }
+
+  const text = await resp.text();
+  return text ? JSON.parse(text) : {};
+}
+
+// ── Desk Command Agent (send text, poll for reply) ──────────────────────────────────
+
+/** Send text to the desk Command agent, returns the command id immediately or throws. */
+export async function deskCommand(text: string): Promise<string> {
+  const url = `${PERSONA_BASE}/command`;
+  const resp = await fetch(url, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', ...bridgeAuthHeaders() },
+    body: JSON.stringify({ text }),
+    signal: AbortSignal.timeout(30 * 60 * 1000), // 30 minutes
+  });
+
+  if (resp.status === 202 || resp.status === 200) {
+    const data = await resp.json();
+    return data.id as string;
+  }
+
+  throw explainDenied(resp.status, 'Desk command');
+}
+
+/** Get command history (the tail of recent commands with their replies). */
+export async function deskCommandHistory(limit: number = 10): Promise<Array<{
+  id: string;
+  at: string;
+  source: string;
+  text: string;
+  reply?: string;
+  kind?: string;
+}>> {
+  const url = `${PERSONA_BASE}/command/history?limit=${encodeURIComponent(String(limit))}`;
+  const resp = await fetch(url, {
+    signal: AbortSignal.timeout(30 * 60 * 1000), // 30 minutes
+  });
+
+  if (!resp.ok) {
+    throw new Error(`Command history failed: HTTP ${resp.status}`);
+  }
+
+  const data = await resp.json();
+  return data.items ?? [];
 }

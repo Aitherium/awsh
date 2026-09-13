@@ -19,7 +19,7 @@ import {
   isValidAnimation,
   mergeAnimationList,
   PERSONA_ANIMATIONS,
-} from '../src/persona-bridge.js';
+} from '../src/awdesk-bridge.js';
 
 test('parseMcpBody handles plain JSON', () => {
   const out = parseMcpBody('application/json', '{"result":{"ok":true}}');

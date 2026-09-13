@@ -104,7 +104,7 @@ import { readFileSync } from 'fs';
 import { extname } from 'path';
 import { VERSION as SHELL_VERSION } from './version.js';
 import type { ShellConfig } from './config.js';
-import { loadConfig, setActiveConfig, deepseekProvider, kimiProvider, DEFAULT_AGENT, isLoopback, CLOUD_IDENTITY_URL } from './config.js';
+import { loadConfig, setActiveConfig, deepseekProvider, kimiProvider, DEFAULT_AGENT} from './config.js';
 import { resolveBackend } from './backend-resolver.js';
 import { GenesisClient } from './client.js';
 import { renderBanner, createStreamRenderer } from './renderer.js';
@@ -299,6 +299,57 @@ async function main() {
       ? chalk.dim('  Open a NEW terminal, then type a question where a command goes.')
       : chalk.yellow(`  ${bad} step(s) could not be completed — see above.`));
     process.exit(bad === 0 ? 0 : 1);
+  }
+
+  // ── `awsh components` — what is INSTALLED on this device ─────────────────
+  //
+  // Packs are brains; components are the things a machine carries (awgym,
+  // awrun's queue, awdesk, an ollama). The awdk daemon is the ONE loader for
+  // them (GET /components); the shell asks it rather than re-reading manifests,
+  // and says so when it is not running instead of listing nothing.
+  if (args[0] === 'components' || args[0] === 'component') {
+    const { discoverComponentPacks, openUrl, DAEMON_BASE } = await import('./components.js');
+    const { result, packs } = await discoverComponentPacks();
+    if (result.state === 'offline') {
+      console.log(`  The awdk daemon at ${DAEMON_BASE} is not answering — components are`);
+      console.log('  listed by it. Start it with `adk up`, or point AITHER_ADK_URL at it.');
+      process.exit(2);
+    }
+    if (result.state === 'unsupported') {
+      console.log(`  The daemon at ${DAEMON_BASE} answers, but has no /components — an awdk`);
+      console.log('  older than the component contract. Upgrade awdk (>= 3.9) and restart `adk up`.');
+      process.exit(2);
+    }
+    if (args[1] === 'open') {
+      const want = (args[2] || '').toLowerCase();
+      const pk = packs.find(p => p.name.toLowerCase() === want);
+      if (!pk || !pk.appUrl) {
+        console.log(chalk.yellow(`  ${args[2] || '(no id)'} has no UI to open here.`));
+        process.exit(1);
+      }
+      const ok = await openUrl(pk.appUrl);
+      console.log(ok ? `  ${chalk.magenta('◈')} ${chalk.bold(pk.title || pk.name)}  ${chalk.cyan(pk.appUrl)}`
+                     : chalk.red(`  could not open ${pk.appUrl}`));
+      process.exit(ok ? 0 : 1);
+    }
+    if (args.includes('--json')) {
+      console.log(JSON.stringify({ base: result.base, components: result.components }, null, 2));
+      return;
+    }
+    console.log();
+    for (const c of result.components) {
+      const pk = packs.find(p => p.name === c.id);
+      const mark = c.health_ok ? chalk.green('◈') : c.status === 'running' ? chalk.yellow('◈') : chalk.dim('·');
+      const where = pk?.appUrl ? chalk.cyan(pk.appUrl) : chalk.dim(c.endpoint || `(${c.type})`);
+      console.log(`  ${mark} ${chalk.bold(c.id.padEnd(16))} ${c.status.padEnd(10)} ${where}`);
+      if (pk?.commands?.length) {
+        console.log(chalk.dim(`     commands: ${pk.commands.map(x => x.name).join(', ')}`));
+      }
+    }
+    console.log();
+    console.log(chalk.dim('  Open one:  awsh components open <id>      Start one:  adk addon enable <id>'));
+    console.log();
+    return;
   }
 
   // ── `awsh packs` — what brains are installed ─────────────────────────────
@@ -714,9 +765,7 @@ $rows | ForEach-Object { [Console]::Out.WriteLine("PATH=" + $_) }`;
   // "login" fell through to positional one-shot chat → POSTed to the gateway's
   // /chat/stream (which the OpenAI-compat gateway doesn't serve) → 404, surfaced
   // as a confusing "Error: not_found". Device login always uses the IDENTITY URL.
-  // `--login` was parsed (loginIdx) but never acted on — the documented flag was
-  // dead code and fell through to the REPL. Same path as the subcommand now.
-  if (args[0] === 'login' || loginIdx >= 0) {
+  if (args[0] === 'login') {
     await ensureDeviceLogin(client, config);
     process.exit(0);
   }
@@ -738,46 +787,17 @@ $rows | ForEach-Object { [Console]::Out.WriteLine("PATH=" + $_) }`;
   // Open a raw interactive shell into a prod/dev environment through the tunnel
   // (wss://<tunnel>/tunnel/ssh) from ANY PC. Must work as a top-level subcommand
   // BEFORE the REPL. Device-login first if needed.
-  //
-  // Headless one-shot (no TTY needed — CI, cron, PowerShell, Claude Code/Codex):
-  //   aither connect [container] -x "<cmd>"      one command
-  //   aither connect [container] -- <cmd…>       everything after `--` is ONE line
-  //   aither connect [container] --json -x "…"   {code, output, reason} on stdout
-  // Exit code = the remote `$?` in container mode; 0/1 for the restricted shell.
   if (args[0] === 'connect' || args[0] === 'ssh') {
     const rest = args.slice(1);
     let container: string | undefined;
     let host: string | undefined;
-    let timeoutMs: number | undefined;
-    const commands: string[] = [];
-    let json = false;
     for (let i = 0; i < rest.length; i++) {
-      if (rest[i] === '--') { commands.push(rest.slice(i + 1).join(' ')); break; }
-      else if ((rest[i] === '--exec' || rest[i] === '-x') && rest[i + 1]) { commands.push(rest[++i]); }
-      else if (rest[i] === '--timeout' && rest[i + 1]) { timeoutMs = Number(rest[++i]) * 1000; }
-      else if (rest[i] === '--json') { json = true; }
-      else if ((rest[i] === '--container' || rest[i] === '-c') && rest[i + 1]) { container = rest[++i]; }
+      if ((rest[i] === '--container' || rest[i] === '-c') && rest[i + 1]) { container = rest[++i]; }
       else if ((rest[i] === '--tunnel' || rest[i] === '--host') && rest[i + 1]) { host = rest[++i]; }
       else if (!rest[i].startsWith('-') && !container) { container = rest[i]; }
     }
-    const { getActiveProfile } = await import('./auth.js');
-    // The auto-provisioned local root profile is NOT a login the tunnel accepts
-    // (it closes 4001). Treat it as signed-out here so we device-login instead of
-    // failing after the handshake.
-    const profile = getActiveProfile();
-    if (!profile?.access_token || profile.token_type === 'local') {
-      await ensureDeviceLogin(client, config);
-    }
-    if (commands.length) {
-      const { execRemote } = await import('./terminal-exec.js');
-      const result = await execRemote(
-        { container, host, commands, timeoutMs },
-        json ? undefined : (chunk) => process.stdout.write(chunk),
-      );
-      if (json) process.stdout.write(JSON.stringify(result) + '\n');
-      else if (result.reason === 'error' || result.reason === 'timeout') process.stderr.write(chalk.red(`  ${result.reason}: ${result.output.trim().split('\n').pop()}\n`));
-      process.exit(result.code);
-    }
+    const { getActiveToken } = await import('./auth.js');
+    if (!getActiveToken()) { await ensureDeviceLogin(client, config); }
     const { connectTerminal } = await import('./terminal.js');
     const code = await connectTerminal({ container, host });
     process.exit(code);
@@ -935,9 +955,14 @@ $rows | ForEach-Object { [Console]::Out.WriteLine("PATH=" + $_) }`;
   const resolved = config.provider
     ? { switched: false, chosen: 'pinned' as const, url: config.genesisUrl, reachable: true }
     : await resolveBackend(config);
+  // Point the client at whatever rung we landed on. This used to run ONLY on a cloud
+  // failover, so a LOCAL rung that changed the url (the adk daemon on :9001 when the
+  // configured endpoint was something else) was probed, chosen, reported -- and then
+  // never dialed, because the client kept the base it was built with. Unconditional
+  // is a no-op when the url did not change.
+  client.setBaseUrl(config.genesisUrl);
+  setActiveConfig(config);  // refresh the process-wide bridge with the chosen urls
   if (resolved.switched) {
-    client.setBaseUrl(config.genesisUrl);
-    setActiveConfig(config);  // refresh the process-wide bridge with cloud URLs
     if (!config.printMode) {
       console.log();
       console.log(chalk.yellow('  ⚠ Local AitherOS backend is offline — using the cloud gateway')
@@ -990,6 +1015,27 @@ $rows | ForEach-Object { [Console]::Out.WriteLine("PATH=" + $_) }`;
   // skip them (and their values) and keep everything else.
   const positional = collectPositional(args);
 
+  // A bare verb that IS a registered slash command runs that command, not a
+  // chat turn. Measured 2026-09-10: `aither models` went to one-shot chat, the
+  // agent free-associated "models" into mediaforge_list_characters, and the
+  // owner concluded there were no model controls — while /models (status, use,
+  // set, route) had existed all along behind `-c`. commands.json advertises
+  // these verbs as commands; the verb must dispatch as one.
+  if (positional.length > 0 && !config.printMode) {
+    const { getCommand } = await import('./commands.js');
+    const verb = positional[0].replace(/^\//, '').toLowerCase();
+    const cmd = getCommand(verb);
+    if (cmd) {
+      try {
+        await cmd.handler(client, positional.slice(1).join(' '), config);
+        process.exit(0);
+      } catch (err) {
+        console.error(chalk.red(`${verb}: ${(err as Error).message}`));
+        process.exit(1);
+      }
+    }
+  }
+
   const wantsHeadless = positional.length > 0 || config.printMode;
   if (wantsHeadless) {
     let prompt = positional.join(' ') || printPrompt;
@@ -1027,15 +1073,6 @@ async function ensureDeviceLogin(client: GenesisClient, config: ShellConfig): Pr
   console.log();
   console.log(chalk.bold('  🔐 This endpoint requires sign-in (no local root).'));
   try {
-    // `aither login` / `connect` run BEFORE resolveBackend(), so the cloud
-    // repoint of a loopback identityUrl (config.ts) hasn't happened yet and the
-    // device-code request died with "fetch failed" against 127.0.0.1:8115.
-    // Probe the local IdP briefly; fall back to the public edge if it's absent.
-    if (isLoopback(config.identityUrl)) {
-      const localUp = await fetch(`${config.identityUrl}/health`, { signal: AbortSignal.timeout(1500) })
-        .then((r) => r.ok).catch(() => false);
-      if (!localUp) config.identityUrl = CLOUD_IDENTITY_URL;
-    }
     const dc = await requestDeviceCode(config.identityUrl, 'AitherShell');
     console.log();
     console.log('  Open this URL in your browser and approve the device:');
@@ -1391,12 +1428,18 @@ async function oneShotChat(
     if (omnibox && fmt === 'text') {
       const { stripOmniboxOpener } = await import('./situation.js');
       const { linkifyTerminal } = await import('./renderer.js');
+      // This is the path that prints a model reply INSIDE the user's own shell,
+      // so a fence here is a command they are about to run -- drop the
+      // delimiters, keep the body byte-for-byte. Measured 2026-09-12: the
+      // omnibox got no renderer at all, so the raw markdown fence went straight
+      // to stdout.
+      const { stripWrappingFence } = await import('./tui/chat-formatter.js');
       // A cited source you cannot click is a citation you cannot follow.
       // The model emits markdown links about half the time despite being
       // told not to, so the reader saw a literal [CNN](https://...); this
       // turns both that and any bare URL into an OSC 8 hyperlink, and
       // degrades to readable text on a terminal without OSC 8.
-      const text = linkifyTerminal(stripOmniboxOpener(answer));
+      const text = linkifyTerminal(stripWrappingFence(stripOmniboxOpener(answer)));
       if (text) process.stdout.write(text + (text.endsWith('\n') ? '' : '\n'));
       else process.stdout.write(chalk.dim('  (no answer from the agent — try: awsh "' +
                                           (process.env.AWSH_OMNIBOX_LINE || '') + '")\n'));

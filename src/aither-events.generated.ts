@@ -192,6 +192,10 @@ export const FLUX_PILLARS: Record<string, Pillar> = {
   'gpu.aq': 'automation',
   'msh.j': 'automation',
   'msh.l': 'automation',
+  'retr.q': 'context',
+  'retr.e': 'orchestration',
+  'retr.i': 'learning',
+  'retr.p': 'learning',
 };
 
 /** SixPillarsKernel tick phase -> pillar. P5 is 'Creation' there, Automation here. */

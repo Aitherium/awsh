@@ -6,6 +6,7 @@ import chalk from 'chalk';
 import ora, { type Ora } from './spinner.js';
 import { marked } from 'marked';
 import { markedTerminal } from 'marked-terminal';
+import { supportsLanguage } from 'cli-highlight';
 import { writeFileSync, mkdirSync, existsSync } from 'fs';
 import { VERSION } from './version.js';
 import { join, resolve } from 'path';
@@ -501,12 +502,54 @@ export function autoOpenImagesFromText(text: string): void {
   }
 }
 
+/**
+ * Make model markdown safe for the terminal highlighter.
+ *
+ * Two failure modes seen live 2026-09-12 in a remote-shell answer:
+ *   1. A fence whose info-string is PROSE - the model wrote "```powershell"
+ *      then, without closing it, a line "A few practical notes:". marked took
+ *      that line as the block's language and handed it to highlight.js, which
+ *      logged `Could not find the language 'A few practical notes:'` and
+ *      rendered the block wrong.
+ *   2. An UNCLOSED fence - everything after the opening ``` gets swallowed into
+ *      one code block and reflowed as code.
+ *
+ * Fix: keep a fence's language only when highlight.js knows it (first token,
+ * `supportsLanguage`), else drop to plaintext, and close a dangling fence at
+ * end-of-text. Well-formed markdown passes through untouched.
+ */
+export function sanitizeCodeFences(md: string): string {
+  const NL = String.fromCharCode(10);
+  const lines = md.split(NL);
+  const out: string[] = [];
+  let open = false;
+  for (const line of lines) {
+    const m = line.match(/^(\s*)(`{3,}|~{3,})(.*)$/);
+    if (m) {
+      if (!open) {
+        open = true;
+        const first = m[3].trim().split(/\s+/)[0] || '';
+        const lang = first && supportsLanguage(first) ? first : '';
+        out.push(`${m[1]}${m[2]}${lang}`);
+      } else {
+        open = false;
+        out.push(`${m[1]}${m[2]}`);
+      }
+      continue;
+    }
+    out.push(line);
+  }
+  if (open) out.push('```');  // close a dangling fence so the tail is prose, not code
+  return out.join(NL);
+}
+
 export function renderMarkdown(text: string): string {
   try {
     let clean = text;
     clean = decodeHtmlEntities(clean);
     clean = stripWebCruft(clean);
     clean = resolveImagePaths(clean);
+    clean = sanitizeCodeFences(clean);
     return marked.parse(clean) as string;
   } catch {
     return text;

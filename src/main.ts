@@ -910,6 +910,18 @@ $rows | ForEach-Object { [Console]::Out.WriteLine("PATH=" + $_) }`;
     return;
   }
 
+  // `awsh rc` — make THIS machine reachable from your phone. Intercepted here for
+  // the same reason as `harness` and `room`: it drives the local session daemon and
+  // the tunnel link, neither of which needs a chat backend, so waiting on one would
+  // make "add this device" fail exactly when the fleet is the thing being repaired.
+  // It is a thin alias for `adk rc` — see rc-command.ts for why it is not a second
+  // implementation.
+  if (args[0] && args[0].toLowerCase() === 'rc') {
+    const { runRcCommand } = await import('./rc-command.js');
+    process.exitCode = runRcCommand(args.slice(1));
+    return;
+  }
+
   // `aither decisions …` and `aither decide …` — the decision-card surface for the CLI.
   // Like `harness` and `room`, this is intercepted before backend resolution because
   // the daemon is a host process that survives when Genesis does not, so this must
@@ -1550,6 +1562,10 @@ ${chalk.bold('TUI:')}
   AITHER_STEER=1 enables the fixed bottom steering bar (limits terminal scrollback).
 
 ${chalk.bold('Quick actions:')}
+  awsh rc                         Make this machine reachable from your phone:
+                                  enrols it and holds the link, so its sessions
+                                  show up at api.aitherium.com/code
+                                  [--node-class laptop] [--once]
   aither storage nodes             Storage inventory: nodes, drives, freshness
   aither claude "<task>"          Hand a task to a scoped Claude Code subagent
                                   [--allow Read,Grep] [--budget 0.25] [--timeout 300] [--goal <id>]

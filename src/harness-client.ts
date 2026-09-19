@@ -76,10 +76,12 @@ function usage(): void {
   aither harness list                       live sessions
   aither harness harnesses                  what this box can drive
   aither harness agents                     sovereign agent roster
-  aither harness new [--harness claude] [--model-profile deepseek-flash]
+  aither harness new [--harness claude|claude-tty|terminal…] [--model-profile deepseek-flash]
                      [--cwd .] [--title T] [--agent atlas] [--target <container>]
+                     [--extra-args "--flag,--flag2"]   (claude-tty/terminal argv)
   aither harness send <id> <text…>
   aither harness attach <id>                follow the event stream
+  aither harness attach --pty <id>          put THIS terminal on a pty session (Ctrl+] detaches)
   aither harness kill <id>
 
 Sessions live in the daemon (adk harness serve), so one started here is the
@@ -185,6 +187,8 @@ export async function runHarnessCommand(args: string[]): Promise<number> {
         };
         const profile = flag(args, 'model-profile');
         if (profile) body.model_profile = profile;
+        const extra = flag(args, 'extra-args');
+        if (extra) body.extra_args = extra.split(',').map((a) => a.trim()).filter(Boolean);
         const created = await api<{ id: string }>('/sessions', {
           method: 'POST',
           body: JSON.stringify(body),
@@ -203,11 +207,17 @@ export async function runHarnessCommand(args: string[]): Promise<number> {
         return attach(id);
       }
       case 'attach': {
-        if (!args[1]) {
-          console.error('usage: aither harness attach <id>');
+        const pty = args.includes('--pty');
+        const id = args.slice(1).find((a) => !a.startsWith('--') && a !== flag(args, 'since'));
+        if (!id) {
+          console.error('usage: aither harness attach [--pty] <id>');
           return 2;
         }
-        return attach(args[1], Number(flag(args, 'since', '0')) || 0);
+        if (pty) {
+          const { attachPty } = await import('./pty-attach.js');
+          return attachPty(id, { since: Number(flag(args, 'since', '0')) || 0 });
+        }
+        return attach(id, Number(flag(args, 'since', '0')) || 0);
       }
       case 'kill': {
         if (!args[1]) {

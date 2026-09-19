@@ -20,6 +20,7 @@
  */
 
 import { spawn } from 'node:child_process';
+import { basename } from 'node:path';
 import { COLORS } from './tui/theme.js';
 
 export const DEFAULT_ALLOW = 'Read';
@@ -133,7 +134,10 @@ export function claudeUsage(): string {
   return `
 ${COLORS.accent('aither claude')} — hand a task to a scoped Claude Code subagent (adk runner)
 
-  aither claude <task…>                       spawn a run and stream its result here
+  aither claude                               open Claude Code HERE, as a daemon-owned
+                                              session (voice and /tell reach it now;
+                                              Ctrl+] detaches, it keeps running)
+  aither claude <task…>                       spawn a scoped run and stream its result here
   aither claude --allow Read,Grep <task…>     tools the subagent may use (default: ${DEFAULT_ALLOW})
   aither claude --budget 0.50 <task…>         max spend in USD (default: ${DEFAULT_BUDGET_USD})
   aither claude --timeout 600 <task…>         run timeout in seconds (default: ${DEFAULT_TIMEOUT_SEC})
@@ -150,12 +154,67 @@ that variable is unset you get a one-line hint naming the source rather than a b
 `;
 }
 
-export async function runClaudeCommand(argv: string[]): Promise<number> {
+export interface ClaudeCommandOptions {
+  /** True when invoked from inside the awsh REPL (`/claude`), where this process's
+   *  stdin belongs to readline and a pty attach would fight it. */
+  fromRepl?: boolean;
+}
+
+/**
+ * `aither claude` with NO task: Claude Code itself, in this terminal, as a session the
+ * daemon owns. Two things differ from typing `claude`: the session is steerable NOW (a
+ * voice line from the desk or `/tell` lands in its input box immediately, because the
+ * daemon holds the keyboard), and it outlives this terminal (Ctrl+] detaches;
+ * `aither harness attach --pty <id>` returns). The brain stays whatever Claude Code is
+ * configured with -- the daemon scrubs its own model wiring from the child.
+ */
+export async function openClaudeHere(opts: ClaudeCommandOptions = {}): Promise<number> {
+  if (opts.fromRepl) {
+    console.error(COLORS.muted(
+      '  /claude with no task opens the real Claude Code in a terminal of its own:\n' +
+      '  run  aither claude  from a shell (Ctrl+] detaches), or /claude "<task>" for a scoped run.',
+    ));
+    return 2;
+  }
+  if (!process.stdin.isTTY) {
+    console.error(COLORS.error('  claude: opening Claude Code needs a terminal (stdin is not a TTY)'));
+    return 2;
+  }
+  const { api } = await import('./harness-client.js');
+  const { attachPty } = await import('./pty-attach.js');
+  const cwd = process.cwd();
+  let created: { id: string; harness_session_id?: string };
+  try {
+    created = await api<{ id: string; harness_session_id?: string }>('/sessions', {
+      method: 'POST',
+      body: JSON.stringify({ harness: 'claude-tty', cwd, title: basename(cwd) || 'claude' }),
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(COLORS.error(`  claude: could not start a daemon-owned session: ${msg}`));
+    if (/fetch failed|ECONNREFUSED|no harness token/i.test(msg)) {
+      console.error(COLORS.muted('  the harness daemon is not answering — start it with:  adk harness serve'));
+    }
+    return 1;
+  }
+  console.error(COLORS.muted(
+    `  session ${created.id}` +
+    (created.harness_session_id ? ` (Claude id ${created.harness_session_id})` : '') +
+    ' — daemon-owned: voice and /tell reach it now',
+  ));
+  return attachPty(created.id);
+}
+
+export async function runClaudeCommand(argv: string[], opts: ClaudeCommandOptions = {}): Promise<number> {
   const parsed = parseClaudeArgs(argv);
   if (parsed.help) { console.log(claudeUsage()); return 0; }
 
-  // A task is required unless the caller is forwarding --task-file to the runner.
+  // No task and no --task-file: not an error any more -- it is Claude Code itself,
+  // here, as a daemon-owned session. The scoped runner keeps every other shape.
   const hasTaskFile = parsed.passthrough.includes('--task-file');
+  if (!parsed.task && !hasTaskFile && parsed.passthrough.length === 0) {
+    return openClaudeHere(opts);
+  }
   if (!parsed.task && !hasTaskFile) {
     console.error(COLORS.error('  claude: a task is required — aither claude "<what to do>"'));
     console.log(claudeUsage());

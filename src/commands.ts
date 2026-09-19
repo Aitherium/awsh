@@ -7347,7 +7347,7 @@ COMMANDS['claude'] = {
   usage: '/claude [--allow Read,Grep] [--budget 0.25] [--timeout 300] [--goal <id>] <task…>',
   handler: async (_client: GenesisClient, args: string) => {
     const { runClaudeCommand } = await import('./claude-command.js');
-    await runClaudeCommand(parseQuotedArgs(args.trim()));
+    await runClaudeCommand(parseQuotedArgs(args.trim()), { fromRepl: true });
   },
 };
 

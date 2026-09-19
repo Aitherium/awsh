@@ -23,18 +23,23 @@ import {
   recommendModel,
   formatMb,
   DEFAULT_PORT,
+  prismRuntimeDeclared,
 } from '../src/bonsai-local.js';
 
 describe('bonsai catalogue', () => {
-  test('carries all four sizes with the real blob sizes', () => {
-    assert.equal(BONSAI_MODELS.length, 4);
+  test('carries every size with the real blob sizes', () => {
     const byId = Object.fromEntries(BONSAI_MODELS.map((m) => [m.id, m.sizeMb]));
     // These are the measured HF blob sizes. If one of these changes, the browser catalogue
-    // and check_bonsai_weight_lane.py must change with it — they are the same four files.
+    // and check_bonsai_weight_lane.py must change with it — they are the same files.
+    // Pinned by ID rather than by COUNT: the count assertion only said "four"
+    // and would have had to be edited for any addition, which makes it a
+    // speed bump rather than a guard. Each id carries its own measured size,
+    // and a removed row now fails as a missing size instead of an off-by-one.
     assert.equal(byId['bonsai-1.7b'], 236);
     assert.equal(byId['bonsai-4b'], 545);
     assert.equal(byId['bonsai-8b'], 1104);
     assert.equal(byId['bonsai-27b'], 3627);
+    assert.equal(byId['bonsai2-27b'], 5671);
   });
 
   test('is ordered smallest-first, so the picker offers a ladder', () => {
@@ -42,9 +47,27 @@ describe('bonsai catalogue', () => {
     assert.deepEqual(sizes, [...sizes].sort((a, b) => a - b));
   });
 
-  test('every entry names a Q1_0 gguf the weights host actually serves', () => {
+  test('every entry names a gguf the weights host actually serves', () => {
+    // This asserted ONE family pattern (`Bonsai-<n>B-Q1_0.gguf`) because the
+    // catalogue only held Bonsai 1. Bonsai 2 is a different family with a
+    // different quantisation, so the useful invariant is not 'they all look
+    // like Bonsai 1' -- it is that each file matches ITS OWN family's naming,
+    // which is what the mirror serves it under. Widening this to /\.gguf$/
+    // would have kept it green and stopped it catching anything.
     for (const m of BONSAI_MODELS) {
-      assert.match(m.file, /^Bonsai-[\d.]+B-Q1_0\.gguf$/);
+      const pattern = m.id.startsWith('bonsai2-')
+        ? /^Ternary-Bonsai-2-[\d.]+B-P(TQ1|Q2)_0\.gguf$/
+        : /^Bonsai-[\d.]+B-Q1_0\.gguf$/;
+      assert.match(m.file, pattern);
+    }
+  });
+
+  test('a fork-only model declares its runtime, and a stock one does not', () => {
+    // The field that decides whether `start` refuses. If a future row forgets
+    // it, that model gets served by stock llama.cpp as confident nonsense.
+    for (const m of BONSAI_MODELS) {
+      if (m.id.startsWith('bonsai2-')) assert.equal(m.runtime, 'prism', m.id);
+      else assert.equal(m.runtime, undefined, m.id);
     }
   });
 });
@@ -126,5 +149,57 @@ describe('formatMb', () => {
 describe('defaults', () => {
   test('serves on llama.cpp default port, which is where adk probes for a local endpoint', () => {
     assert.equal(DEFAULT_PORT, 8080);
+  });
+});
+
+/**
+ * BONSAI 2 IS A CHOICE, NOT A DEFAULT.
+ *
+ * It is the better model on our benchmark and it is still the wrong thing to
+ * auto-select: it needs a fork the user has probably not built, and stock
+ * llama.cpp does not fail on it -- it serves confident nonsense. So the rules
+ * are (1) never recommend it automatically, (2) always offer it by id, and
+ * (3) refuse to start it unless a prism runtime is declared.
+ */
+describe('choosing Bonsai 2', () => {
+  test('is offered by id', () => {
+    const m = findModel('bonsai2-27b');
+    assert.ok(m, 'bonsai2-27b must be selectable');
+    assert.equal(m.runtime, 'prism');
+    assert.equal(m.sizeMb, 5671);
+  });
+
+  test('is never auto-recommended, at any RAM size', () => {
+    // 256 GB would clear every ramGb threshold in the catalogue.
+    for (const ram of [4, 8, 16, 32, 64, 256]) {
+      assert.notEqual(recommendModel(ram).id, 'bonsai2-27b',
+        `auto-recommended a fork-only model at ${ram} GB`);
+      assert.equal(recommendModel(ram).runtime, undefined,
+        `auto-recommended a model the stock runtime cannot serve at ${ram} GB`);
+    }
+  });
+
+  test('Bonsai 1 27B survives -- a choice means both options exist', () => {
+    const legacy = findModel('bonsai-27b');
+    assert.ok(legacy);
+    assert.equal(legacy.runtime, undefined);
+    assert.equal(recommendModel(64).id, 'bonsai-27b');
+  });
+
+  test('the runtime guard asks the BINARY what it is, never the path', () => {
+    // A stock build in a directory that happens to say "prism" was the exact
+    // way the first path-substring version let gibberish through.
+    const stock = () => 'version: 6800 (972d2313) built with GNU 14.2.0';
+    const fork = () => 'version: 0.2.0-dev (build 1, commit 5d80cff) built with GNU 14.2.0';
+    const broken = () => '';
+
+    assert.equal(prismRuntimeDeclared({ LLAMA_SERVER_BIN: '/home/prism/llama.cpp/bin/llama-server' }, stock), false,
+      'a stock binary under a path that says prism must NOT pass');
+    assert.equal(prismRuntimeDeclared({ LLAMA_SERVER_BIN: '/usr/bin/llama-server' }, fork), true,
+      'a fork binary passes wherever it lives');
+    assert.equal(prismRuntimeDeclared({}, broken), false,
+      'a binary that cannot answer --version is a refusal, not a pass');
+    assert.equal(prismRuntimeDeclared({ AITHER_PRISM_RUNTIME: '1' }, broken), true,
+      'the explicit override still wins for a rebased/renamed fork');
   });
 });

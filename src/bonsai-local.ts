@@ -16,7 +16,7 @@
  * when it is most useful — a dead fleet is the moment you want a model on your own machine.
  */
 
-import { spawn } from 'node:child_process';
+import { spawn, execFileSync } from 'node:child_process';
 import { createWriteStream, existsSync, mkdirSync, statSync, unlinkSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir, totalmem } from 'node:os';
 import { join } from 'node:path';
@@ -38,6 +38,16 @@ export interface BonsaiModel {
   /** Working-set RAM for CPU inference, GB. Weights + KV, no swap. */
   ramGb: number;
   blurb: string;
+  /**
+   * Which llama.cpp can actually SERVE this file.
+   *
+   * Omitted = stock. `prism` means the PrismML fork and nothing else: Bonsai 2
+   * carries Walsh-Hadamard-rotated PTQ1_0/PQ2_0 weights, and stock llama.cpp
+   * LOADS them and emits fluent gibberish -- healthy /health, wrong tokens, no
+   * error and no refusal. That is the one failure mode a CLI must never hand
+   * someone silently, so `start` checks this before it spawns anything.
+   */
+  runtime?: 'prism';
 }
 
 /**
@@ -53,7 +63,22 @@ export const BONSAI_MODELS: BonsaiModel[] = [
   { id: 'bonsai-4b', file: 'Bonsai-4B-Q1_0.gguf', sizeMb: 545, ramGb: 8, blurb: 'laptop, good latency' },
   { id: 'bonsai-8b', file: 'Bonsai-8B-Q1_0.gguf', sizeMb: 1104, ramGb: 16, blurb: 'desktop, real inference' },
   { id: 'bonsai-27b', file: 'Bonsai-27B-Q1_0.gguf', sizeMb: 3627, ramGb: 32, blurb: 'workstation, reasoning' },
+  // Bonsai 2 (PrismML, 2026-09-17). Measured on an RTX 5090 against Bonsai 1 on
+  // AitherBench: 0.9165 vs 0.7821 overall at 328 vs 713 mean tokens per answer.
+  // Offered as a CHOICE, not a replacement -- bonsai-27b above stays, because it
+  // runs on the llama.cpp anyone already has.
+  {
+    id: 'bonsai2-27b',
+    file: 'Ternary-Bonsai-2-27B-PTQ1_0.gguf',
+    sizeMb: 5671,
+    ramGb: 32,
+    blurb: 'newest; stronger reasoning, half the tokens - needs the PrismML fork',
+    runtime: 'prism',
+  },
 ];
+
+/** Where to get the one runtime that serves Bonsai 2. */
+export const PRISM_FORK_URL = 'https://github.com/PrismML-Eng/llama.cpp';
 
 export function findModel(id: string): BonsaiModel | undefined {
   const want = id.toLowerCase().replace(/^bonsai[-_]?/, '');
@@ -72,8 +97,61 @@ export function findModel(id: string): BonsaiModel | undefined {
  */
 export function recommendModel(ramGb: number): BonsaiModel {
   const budget = ramGb * 0.6;
-  const fits = BONSAI_MODELS.filter((m) => m.ramGb <= budget);
-  return fits.length > 0 ? fits[fits.length - 1] : BONSAI_MODELS[0];
+  // Only ever AUTO-recommend something the stock runtime can serve. Bonsai 2 is
+  // the better model and it is still the wrong default: auto-selecting it would
+  // hand a first-time user a fork they have not built, and the failure would
+  // arrive as gibberish rather than as an error. It stays opt-in by id.
+  const stock = BONSAI_MODELS.filter((m) => !m.runtime);
+  const fits = stock.filter((m) => m.ramGb <= budget);
+  // The floor is the smallest STOCK model, not the catalogue's first row --
+  // if a fork-only model were ever listed first, the floor would hand it out.
+  return fits.length > 0 ? fits[fits.length - 1] : stock[0];
+}
+
+/**
+ * The fork identifies itself: `llama-server --version` prints the commit it was
+ * built from, and PrismML's `prism` branch is pinned at 5d80cff (release
+ * prism-b10687-5d80cff, the commit our own image reports). Stock llama.cpp
+ * prints a different commit and carries no PTQ1_0 types at all.
+ */
+export const PRISM_FORK_COMMIT = '5d80cff';
+
+/** Ask the binary what it is. Returns the `--version` text, or '' if it cannot run. */
+export function probeLlamaServerVersion(bin: string): string {
+  try {
+    return execFileSync(bin, ['--version'], {
+      encoding: 'utf8', timeout: 8000, stdio: ['ignore', 'pipe', 'pipe'],
+    });
+  } catch (e) {
+    const err = e as { stdout?: string; stderr?: string };
+    // llama-server prints --version to STDERR and exits 0; a non-zero exit
+    // still carries the text, so read both before giving up.
+    return `${err.stdout || ''}${err.stderr || ''}`;
+  }
+}
+
+/**
+ * Does the llama-server we are about to spawn understand Bonsai 2?
+ *
+ * The first version matched /prism/i against the BINARY PATH. That passes
+ * `/home/prism/llama.cpp/build/bin/llama-server` (a user named prism running
+ * stock) and `~/src/prism-eval/llama.cpp/...` (a stock clone in a directory
+ * that mentions the word), and delivers precisely the silent gibberish the gate
+ * exists to stop. A path is a name someone typed; `--version` is what the
+ * binary IS, and the fork's commit is cheap to read.
+ *
+ * Order: AITHER_PRISM_RUNTIME=1 is the explicit override for a build whose
+ * --version we cannot trust (a rebased fork, a renamed binary). Otherwise the
+ * binary is asked, and a probe that cannot run or does not name the fork's
+ * commit is a refusal -- the same refusal text the caller already prints.
+ */
+export function prismRuntimeDeclared(
+  env: NodeJS.ProcessEnv = process.env,
+  probe: (bin: string) => string = probeLlamaServerVersion,
+): boolean {
+  if (env.AITHER_PRISM_RUNTIME === '1') return true;
+  const bin = env.LLAMA_SERVER_BIN || 'llama-server';
+  return probe(bin).includes(PRISM_FORK_COMMIT);
 }
 
 export function formatMb(mb: number): string {
@@ -279,6 +357,31 @@ async function cmdStart(args: string[], genesisUrl: string, port: number, json: 
     console.error(
       `${COLORS.warn('[!!]')} ${model.id} needs ~${model.ramGb} GB and this machine has ${ram} GB.\n` +
         `     ${COLORS.accent(`aither bonsai start ${recommendModel(ram).id}`)} fits.`,
+    );
+    return 2;
+  }
+
+  // THE GIBBERISH GATE. Refuse BEFORE downloading 5.7 GB, not after spawning a
+  // runtime that will answer every request fluently and wrongly.
+  if (model.runtime === 'prism' && !prismRuntimeDeclared()) {
+    console.error(
+      `${COLORS.warn('[!!]')} ${model.id} needs the PrismML llama.cpp fork.
+` +
+        `     Stock llama.cpp LOADS this model and returns confident nonsense -
+` +
+        `     a healthy /health, wrong tokens, no error. So this refuses instead.
+
+` +
+        `     Build it:   ${COLORS.accent(PRISM_FORK_URL)} (branch prism)
+` +
+        `     Then:       ${COLORS.accent(`LLAMA_SERVER_BIN=/path/to/prism/llama-server aither bonsai start ${model.id}`)}
+` +
+        `     Or assert:  ${COLORS.accent('AITHER_PRISM_RUNTIME=1')}
+
+` +
+        `     Prefer the model that runs on the llama.cpp you already have?
+` +
+        `     ${COLORS.accent('aither bonsai start bonsai-27b')}`,
     );
     return 2;
   }

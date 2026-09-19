@@ -22,8 +22,38 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
-import { CLOUD_URL, applyCloudFallback, type ShellConfig } from './config.js';
+import { CLOUD_URL, applyCloudFallback, noteLocalDaemonBooting, type ShellConfig } from './config.js';
 import { probeHealth } from './status-banner.js';
+
+/** How long the resolver waits for a daemon IT just launched, and how often it looks.
+ *  Pure, so the test can pin it. Measured 2026-09-19: a cold daemon binds in ~13 s
+ *  once its boot no longer blocks on the gateway attach; 25 s covers a slow disk. The
+ *  old 2 x 1 s wait was guaranteed to expire, so every cold start paid the probe AND
+ *  landed on the cloud rung -- which then demanded a sign-in the owner never needed. */
+export function bootWaitPlan(env: NodeJS.ProcessEnv = process.env): { waitMs: number; pollMs: number } {
+  const text = (env.AITHERSHELL_ADK_BOOT_WAIT_S || '').trim();
+  const raw = Number(text);
+  const waitS = text !== '' && Number.isFinite(raw) && raw >= 0 ? raw : 25;
+  return { waitMs: Math.round(waitS * 1000), pollMs: 1000 };
+}
+
+/** The daemon launchers this box knows, best first. Pure: every path is an argument.
+ *  ONE spec wins when it exists -- the hidden scheduled-task payload
+ *  (`~/.aither/bin/hidden-tasks/AitherOS-AdkDaemon.cmd`: AITHER_OFFLINE=1, log redirect,
+ *  runs from the canonical tree) is what the watchdog itself launches. Measured
+ *  2026-09-19: this shell launched `awdk/adk-daemon-start.cmd` (a DIFFERENT env:
+ *  --backend vllm, no log redirect, a visible console) while the watchdog launched the
+ *  hidden one every tick -- three launchers fighting over :9001 with two configs. */
+export function daemonStartCandidates(opts: {
+  home: string; here: string; root: string; explicit: string;
+}): { script: string; hidden: boolean }[] {
+  const out: { script: string; hidden: boolean }[] = [];
+  if (opts.explicit) out.push({ script: opts.explicit, hidden: false });
+  out.push({ script: join(opts.home, '.aither', 'bin', 'hidden-tasks', 'AitherOS-AdkDaemon.cmd'), hidden: true });
+  out.push({ script: join(opts.here, '..', '..', '..', '..', '..', 'awdk', 'adk-daemon-start.cmd'), hidden: false });
+  if (opts.root) out.push({ script: join(opts.root, 'awdk', 'adk-daemon-start.cmd'), hidden: false });
+  return out;
+}
 
 export interface ResolvedBackend {
   /** Which rung of the chain we landed on. */
@@ -102,32 +132,41 @@ function adkDaemonCandidates(): string[] {
  *
  *  The derivation on the line below covers the real case (this file inside the monorepo),
  *  and AITHEROS_ROOT covers a relocated tree. Nothing else is knowable from here. */
-function adkStartScript(): string | null {
+function adkStartScript(): { script: string; hidden: boolean } | null {
   const here = fileURLToPath(import.meta.url); // .../.PRODUCTS/.AITHERSHELL/cli/{src,dist}/x.js
-  const root = (process.env.AITHEROS_ROOT || '').trim();
-  const candidates = [
-    (process.env.ADK_DAEMON_START || '').trim(),
-    join(here, '..', '..', '..', '..', '..', 'awdk', 'adk-daemon-start.cmd'),
-    root ? join(root, 'awdk', 'adk-daemon-start.cmd') : '',
-  ].filter(Boolean);
-  for (const c of candidates) { try { if (existsSync(c)) return c; } catch { /* keep looking */ } }
+  const candidates = daemonStartCandidates({
+    home: homedir(),
+    here,
+    root: (process.env.AITHEROS_ROOT || '').trim(),
+    explicit: (process.env.ADK_DAEMON_START || '').trim(),
+  });
+  for (const c of candidates) { try { if (existsSync(c.script)) return c; } catch { /* keep looking */ } }
   return null;
 }
 
 /** Start the daemon if it is not already up, so the sovereign loop comes with the shell
  *  instead of needing a separate manual launch. Detached and best-effort: a failure here
  *  just means we fall through to the existing genesis/cloud resolution. */
-function tryStartAdkDaemon(): void {
-  if (process.env.AITHERSHELL_AUTOSTART_ADK === '0') return;
+function tryStartAdkDaemon(): boolean {
+  if (process.env.AITHERSHELL_AUTOSTART_ADK === '0') return false;
   try {
-    const script = adkStartScript();
-    if (!script) return;
-    spawn('cmd', ['/c', 'start', '', script], {
+    const found = adkStartScript();
+    if (!found) return false;
+    // The hidden payload is launched the way its own watchdog launches it: through
+    // run-hidden.vbs so no console window appears and the process outlives this
+    // shell. Anything else keeps the old `start` (it may need a window of its own).
+    const vbs = join(homedir(), '.aither', 'bin', 'run-hidden.vbs');
+    const useVbs = found.hidden && existsSync(vbs);
+    const argv = useVbs
+      ? ['//B', '//Nologo', vbs, found.script]
+      : ['/c', 'start', '', found.script];
+    spawn(useVbs ? 'wscript' : 'cmd', argv, {
       detached: true,
       stdio: 'ignore',
       windowsHide: true,
     }).unref();
-  } catch { /* best-effort only */ }
+    return true;
+  } catch { return false; /* best-effort only */ }
 }
 
 /**
@@ -186,23 +225,38 @@ export async function resolveBackend(config: ShellConfig): Promise<ResolvedBacke
       }
     }
     const adkUrl = candidates[candidates.length - 1];
-    // Not up — kick off a start, but do NOT block on it. A cold daemon takes ~30-60s to
-    // boot (it loads packs and attaches ~1200 gateway tools), so the previous 6s wait was
-    // guaranteed to expire on a cold start: the user paid 6 seconds, still got the fallback,
-    // and a daemon warmed invisibly in the background. The short grace below only catches
-    // the case where it was ALREADY starting; otherwise we fall through immediately and the
-    // daemon is ready for the next launch.
-    tryStartAdkDaemon();
-    for (let i = 0; i < 2; i++) {
-      await new Promise((r) => setTimeout(r, 1000));
-      if (await probeHealth(`${strip(adkUrl)}/health`, 1500)) {
-        config.genesisUrl = adkUrl;
-        return { chosen: 'adk', url: adkUrl, switched: false, reachable: true };
+    // Not up -- launch it and WAIT for it, bounded. The daemon binds :9001 in ~13 s now
+    // that its boot no longer awaits the gateway attach (adk/server.py lifespan,
+    // 2026-09-19); the previous 2 x 1 s grace was guaranteed to expire on any cold
+    // start, so the owner paid the probe, landed on the cloud rung, and was told to
+    // /login for a backend they never asked for. One bounded wait with a visible
+    // countdown is the honest version: the owner sees WHY the first turn is slow, once.
+    const launched = tryStartAdkDaemon();
+    const plan = bootWaitPlan();
+    const since = Date.now();
+    if (launched && plan.waitMs > 0) {
+      process.stderr.write(`  ⧗ local agent daemon is booting (waiting up to ${Math.round(plan.waitMs / 1000)}s)`);
+      while (Date.now() - since < plan.waitMs) {
+        await new Promise((r) => setTimeout(r, plan.pollMs));
+        process.stderr.write('.');
+        if (await probeHealth(`${strip(adkUrl)}/health`, 1500)) {
+          process.stderr.write(' up\n');
+          config.genesisUrl = adkUrl;
+          config.localDaemonBooting = undefined;
+          noteLocalDaemonBooting(undefined);
+          return { chosen: 'adk', url: adkUrl, switched: false, reachable: true };
+        }
       }
+      process.stderr.write(' still booting\n');
     }
-    // Say so, rather than silently landing on a slower backend.
+    // Say so, rather than silently landing on a slower backend -- and remember it, so a
+    // cloud 401 a moment later names the booting daemon instead of demanding a sign-in.
+    if (launched) {
+      config.localDaemonBooting = { url: adkUrl, since };
+      noteLocalDaemonBooting({ url: adkUrl, since });
+    }
     process.stderr.write(
-      '  ⧗ local agent daemon is starting in the background — it will serve the next launch\n',
+      '  ⧗ local agent daemon is still starting in the background — retry in a moment, or it will serve the next launch\n',
     );
   }
 

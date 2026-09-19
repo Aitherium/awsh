@@ -138,6 +138,10 @@ export interface ShellConfig {
    *  public cloud gateway. Drives the non-blocking "using cloud" announce and
    *  lets mid-session failover avoid re-switching in a loop. */
   autoFailover?: boolean;
+  /** Set by the resolver when it LAUNCHED the local agent daemon and gave up waiting
+   *  for it to bind. Mirrored into the module-level note below so the client, which
+   *  never sees this object, can name the booting daemon on a later cloud 401. */
+  localDaemonBooting?: LocalDaemonBooting;
   /** Direct provider override (DeepSeek, etc). When set, inference bypasses the
    *  AitherOS pipeline entirely and hits this provider with its own key. */
   provider?: ProviderOverride;
@@ -349,4 +353,41 @@ export function setActiveConfig(config: ShellConfig): void {
 
 export function getActiveConfig(): ShellConfig | null {
   return _activeConfig;
+}
+
+// ── The "local daemon is booting" note ──────────────────────────────────────
+//
+// Measured 2026-09-19: the omnibox launched the local agent daemon, waited 2 s,
+// fell through to the cloud gateway, and died on "Cloud gateway requires sign-in --
+// run /login" while a healthy daemon was ~13 s from answering on :9001. The
+// instruction was wrong for the actual state, and the client that throws it has no
+// ShellConfig in hand (it is built from a bare URL). So the resolver leaves ONE
+// module-level note here, and the client reads it before choosing its words.
+
+export interface LocalDaemonBooting { url: string; since: number }
+
+let _localDaemonBooting: LocalDaemonBooting | undefined;
+
+export function noteLocalDaemonBooting(note: LocalDaemonBooting | undefined): void {
+  _localDaemonBooting = note;
+}
+
+export function localDaemonBootingNote(): LocalDaemonBooting | undefined {
+  return _localDaemonBooting;
+}
+
+/** The message for a cloud 401. Pure so the test can pin both branches. */
+export function cloudSignInHint(booting?: LocalDaemonBooting, now: number = Date.now()): string {
+  if (booting) {
+    const age = Math.max(0, Math.round((now - booting.since) / 1000));
+    return (
+      `The local agent daemon at ${booting.url} was still booting (launched ${age}s ago) ` +
+      `so this turn reached the cloud gateway, which needs a sign-in. ` +
+      `Retry in a moment for the free local backend, or run \x1b[36m/login\x1b[0m to use the cloud.`
+    );
+  }
+  return (
+    `Cloud gateway requires sign-in — run \x1b[36m/login\x1b[0m to authenticate, ` +
+    `or start local AitherOS to use the free local backend.`
+  );
 }

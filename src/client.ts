@@ -13,7 +13,7 @@
  */
 
 import type { BackendType, ProviderOverride } from './config.js';
-import { getActiveConfig, applyCloudFallback, DEFAULT_AGENT} from './config.js';
+import { getActiveConfig, applyCloudFallback, DEFAULT_AGENT, cloudSignInHint, localDaemonBootingNote } from './config.js';
 import { ThinkFilter } from './think-filter.js';
 import { buildSituation } from './situation.js';
 import { readFileSync } from 'node:fs';
@@ -1045,10 +1045,7 @@ export class GenesisClient {
             return;
           }
         }
-        throw new Error(
-          `Cloud gateway requires sign-in — run \x1b[36m/login\x1b[0m to authenticate, ` +
-          `or start local AitherOS to use the free local backend.`,
-        );
+        throw new Error(cloudSignInHint(localDaemonBootingNote()));
       }
       // ── 5xx on a STREAMING request → retry ONCE without `stream` ──────────
       //

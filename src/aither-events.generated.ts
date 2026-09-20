@@ -68,6 +68,7 @@ export const SHELL_EVENT_PILLARS: Record<string, Pillar> = {
   'neuron_fire': 'context',
   'ooda_observe': 'context',
   'user_activity': 'context',
+  'sight_observed': 'context',
   'think_start': 'reasoning',
   'thinking': 'reasoning',
   'thinking_end': 'reasoning',

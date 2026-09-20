@@ -82,10 +82,47 @@ function usage(): void {
   aither harness send <id> <text…>
   aither harness attach <id>                follow the event stream
   aither harness attach --pty <id>          put THIS terminal on a pty session (Ctrl+] detaches)
+  aither harness tell <target> <text…>      say it to ONE session: a session id, a Claude id,
+                                            a unique prefix of either, or a unique title word.
+                                            Lands now in a tab awsh opened; at the end of the
+                                            current turn in any other tab.
   aither harness kill <id>
 
 Sessions live in the daemon (adk harness serve), so one started here is the
 same session the browser attaches to on aitherium.com.`);
+}
+
+export interface TellRow { id: string; title?: string; origin?: string; extras?: Record<string, any> }
+
+/**
+ * Exactly-one resolution for `tell`. A target matches a row by id, by the Claude session id
+ * the program carries (extras.harness_session_id), by a PREFIX of either, or by a
+ * case-insensitive word in the title. Zero or many is a refusal, never a guess: measured
+ * 2026-09-19 three tabs on stage were all titled "AitherOS-Fresh", which is exactly the
+ * ambiguity that would put the owner's words in front of the wrong session.
+ */
+export function resolveTellTarget(rows: TellRow[], needle: string): TellRow[] {
+  const n = (needle || '').trim().toLowerCase();
+  if (!n) return [];
+  const ids = (r: TellRow) => [r.id, String(r.extras?.harness_session_id || '')].filter(Boolean)
+    .map((x) => x.toLowerCase());
+  const exact = rows.filter((r) => ids(r).includes(n));
+  if (exact.length) return exact;
+  const byPrefix = rows.filter((r) => ids(r).some((x) => x.startsWith(n)));
+  if (byPrefix.length) return byPrefix;
+  return rows.filter((r) => (r.title || '').toLowerCase().includes(n));
+}
+
+/** The steering event a human sends from awsh -- the desk's steerEvent envelope, same keys. */
+export function tellEvent(targetId: string, text: string, room = 'main'): Record<string, unknown> {
+  return {
+    room,
+    type: 'steering',
+    to: [targetId],
+    hops: 0,
+    actor: { kind: 'human', id: 'owner', name: 'the owner (awsh)' },
+    payload: { text, source: 'awsh:tell' },
+  };
 }
 
 function flag(args: string[], name: string, fallback = ''): string {
@@ -218,6 +255,44 @@ export async function runHarnessCommand(args: string[]): Promise<number> {
           return attachPty(id, { since: Number(flag(args, 'since', '0')) || 0 });
         }
         return attach(id, Number(flag(args, 'since', '0')) || 0);
+      }
+      case 'tell': {
+        const target = args[1];
+        const text = args.slice(2).join(' ').trim();
+        if (!target || !text) {
+          console.error('usage: aither harness tell <target> <text…>');
+          return 2;
+        }
+        const listing = await api<{ sessions: TellRow[] }>('/sessions/unified');
+        const matches = resolveTellTarget(listing.sessions || [], target);
+        if (matches.length !== 1) {
+          console.error(matches.length
+            ? `'${target}' matches ${matches.length} sessions — be more specific:`
+            : `no session matches '${target}'. Sessions:`);
+          for (const r of (matches.length ? matches : listing.sessions || []).slice(0, 12)) {
+            console.error(`  ${r.id.slice(0, 13).padEnd(14)} ${(r.origin || '').padEnd(11)} ${r.title || ''}`);
+          }
+          return 1;
+        }
+        const row = matches[0];
+        const published = await api<{ seq: number }>('/events', {
+          method: 'POST',
+          body: JSON.stringify(tellEvent(row.id, text)),
+        });
+        // The receipt is the truth about delivery; wait briefly for it rather than assume.
+        const deadline = Date.now() + 8000;
+        let receipt: any = null;
+        while (!receipt && Date.now() < deadline) {
+          const ev = await api<{ events: any[] }>('/rooms/main/events?limit=40');
+          receipt = (ev.events || []).find((e) => e.type === 'steering_receipt'
+            && e.payload?.target === row.id && (e.seq || 0) > (published.seq || 0));
+          if (!receipt) await new Promise((r) => setTimeout(r, 400));
+        }
+        const p = receipt?.payload;
+        console.log(p
+          ? `told ${row.title || row.id.slice(0, 12)} — ${p.channel}${p.landed_now ? ' (landed now)' : ''}: ${p.detail}`
+          : `published to ${row.title || row.id.slice(0, 12)}; no receipt yet (the room may be busy)`);
+        return p && p.channel === 'none' ? 1 : 0;
       }
       case 'kill': {
         if (!args[1]) {

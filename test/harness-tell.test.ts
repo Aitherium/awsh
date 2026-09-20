@@ -42,3 +42,13 @@ test('tellEvent is a human steering event addressed to exactly one target', () =
   assert.equal(ev.actor.kind, 'human');
   assert.equal(ev.payload.text, 'look at the gate');
 });
+
+test('an exited session is never resolved, and the top-level Claude id resolves a managed row', () => {
+  const rows: TellRow[] = [
+    { id: 'dead0000', title: 'ghost', status: 'exited', harness_session_id: 'eeeeeeee-0000' },
+    { id: 'live0000', title: 'ghost', status: 'idle', harness_session_id: 'ffffffff-0000' },
+  ];
+  assert.deepEqual(resolveTellTarget(rows, 'ghost').map((r) => r.id), ['live0000']);
+  assert.deepEqual(resolveTellTarget(rows, 'dead0000'), []);
+  assert.deepEqual(resolveTellTarget(rows, 'ffffffff').map((r) => r.id), ['live0000']);
+});

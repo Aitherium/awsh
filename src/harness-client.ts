@@ -92,7 +92,10 @@ Sessions live in the daemon (adk harness serve), so one started here is the
 same session the browser attaches to on aitherium.com.`);
 }
 
-export interface TellRow { id: string; title?: string; origin?: string; extras?: Record<string, any> }
+export interface TellRow {
+  id: string; title?: string; origin?: string; status?: string;
+  harness_session_id?: string; extras?: Record<string, any>;
+}
 
 /**
  * Exactly-one resolution for `tell`. A target matches a row by id, by the Claude session id
@@ -104,8 +107,11 @@ export interface TellRow { id: string; title?: string; origin?: string; extras?:
 export function resolveTellTarget(rows: TellRow[], needle: string): TellRow[] {
   const n = (needle || '').trim().toLowerCase();
   if (!n) return [];
-  const ids = (r: TellRow) => [r.id, String(r.extras?.harness_session_id || '')].filter(Boolean)
-    .map((x) => x.toLowerCase());
+  // A session that has exited cannot be told anything; resolving it would queue the
+  // owner's words for a process that will never read them.
+  rows = rows.filter((r) => r.status !== 'exited');
+  const ids = (r: TellRow) => [r.id, String(r.harness_session_id || r.extras?.harness_session_id || '')]
+    .filter(Boolean).map((x) => x.toLowerCase());
   const exact = rows.filter((r) => ids(r).includes(n));
   if (exact.length) return exact;
   const byPrefix = rows.filter((r) => ids(r).some((x) => x.startsWith(n)));

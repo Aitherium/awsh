@@ -15,6 +15,7 @@
 // protected against MITM. NODE_EXTRA_CA_CERTS is still set when present (harmless,
 // and helps any service that IS chain-issued).
 import { existsSync } from 'fs';
+import { resolveActingIdentity } from './auth.js';
 import { join, basename } from 'path';
 const _caChainPaths = [
   join(process.env.HOME || process.env.USERPROFILE || '', '.aither', 'tls', 'ca-chain.pem'),
@@ -776,10 +777,37 @@ $rows | ForEach-Object { [Console]::Out.WriteLine("PATH=" + $_) }`;
     process.exit(0);
   }
   if (args[0] === 'whoami') {
-    const u = config.authUser;
-    console.log(u
-      ? `  ${chalk.bold(u.display_name || u.username)} <${u.email}>`
-      : chalk.yellow('  Not signed in. Run `aither login`.'));
+    // 🚩 THIS PRINTED ONE IDENTITY WHILE THE PROCESS ACTED AS ANOTHER.
+    // `config.authUser` comes from ~/.aither/auth.json; every request this CLI
+    // makes carries ~/.aither/session-bearer (client.ts). Measured 2026-09-20 on
+    // the owner's box those disagreed completely -- auth.json said `root` with no
+    // email and no tenant, the bearer resolved to david@aitherium.com / platform
+    // -- so the one command whose entire job is "who am I" answered with the name
+    // of nobody. The owner's report was exactly that: "identity doesnt feel
+    // connected to my locally running awdesk + awsh + ...".
+    //
+    // client.ts's comment already records the 2026-08-21 session where this split
+    // cost a debugging run; only the calling half was fixed then. Resolve the
+    // credential we actually send, and when it cannot be resolved say THAT --
+    // "cannot reach a host to resolve it" and "not signed in" are different
+    // statements, and printing the stale cached name instead is what kept this
+    // invisible.
+    const acting = await resolveActingIdentity();
+    if (acting.user) {
+      const email = acting.user.email ? ` <${acting.user.email}>` : '';
+      console.log(`  ${chalk.bold(acting.user.display_name || acting.user.username)}${email}`);
+      if (acting.user.tenant_slug || acting.user.tenant_id) {
+        console.log(chalk.dim(`  tenant ${acting.user.tenant_slug || acting.user.tenant_id}`));
+      }
+      if (acting.source === 'auth.json') {
+        console.log(chalk.dim('  (from the cached profile; no platform credential on this machine)'));
+      }
+    } else if (acting.hasCredential) {
+      console.log(chalk.yellow('  Signed in, but no host could confirm who you are right now.'));
+      if (acting.detail) console.log(chalk.dim(`  ${acting.detail}`));
+    } else {
+      console.log(chalk.yellow('  Not signed in. Run `aither login`.'));
+    }
     process.exit(0);
   }
 

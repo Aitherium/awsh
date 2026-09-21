@@ -4980,6 +4980,34 @@ const COMMANDS: Record<string, Command> = {
     },
   },
 
+  listen: {
+    description: 'Hear you: record from the microphone and optionally steer a session',
+    usage: '/listen [seconds] [--to <session>]',
+    handler: async (_client: GenesisClient, args: string) => {
+      // The capture lives in awvoice (PortAudio), the same posture as playback shelling out
+      // to an OS player -- awsh takes no audio npm dependency. See src/ear.ts.
+      const { listenOnce } = await import('./ear.js');
+      const toMatch = args.match(/--to\s+(\S+)/);
+      const steer = toMatch ? toMatch[1] : '';
+      const secs = parseFloat((args.replace(toMatch?.[0] ?? '', '').trim().split(/\s+/)[0] || ''));
+      const seconds = Number.isFinite(secs) && secs > 0 ? secs : undefined;
+      const spinner = ora(steer ? `Listening, then steering ${steer}...` : 'Listening...').start();
+      const result = listenOnce({ seconds, steer });
+      spinner.stop();
+      if (!result.ok) {
+        // A refusal is NOT silence: the mic being held, or awvoice being absent, each
+        // produce an empty transcript otherwise and read as "you said nothing".
+        console.log(chalk.yellow(`  ${result.error}`));
+        return;
+      }
+      if (!result.heard) { console.log(chalk.dim('  (heard nothing)')); return; }
+      console.log(`  ${chalk.cyan('heard:')} ${result.heard}`);
+      if (result.steered) {
+        console.log(chalk.dim(`  steered to ${result.steered}${result.seq ? ` (seq ${result.seq})` : ''}`));
+      }
+    },
+  },
+
   speak: {
     description: 'Text-to-speech via Lyra',
     usage: '/speak <text> [--voice <name>]',

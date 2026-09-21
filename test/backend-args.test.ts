@@ -113,6 +113,8 @@ test('ALL_VARS: covers every var the AitherOS monorepo\'s own deepseek/kimi-k3 p
     'ANTHROPIC_DEFAULT_SONNET_MODEL', 'ANTHROPIC_DEFAULT_HAIKU_MODEL',
     'ANTHROPIC_DEFAULT_FABLE_MODEL', 'CLAUDE_CODE_SUBAGENT_MODEL',
     'CLAUDE_CODE_EFFORT_LEVEL', 'CLAUDE_CODE_AUTO_COMPACT_WINDOW', 'ENABLE_TOOL_SEARCH',
+    // 2026-09-19: strict third-party validators 400 on the Artifact tool schema.
+    'CLAUDE_CODE_DISABLE_ARTIFACT',
   ];
   for (const v of required) assert.ok((ALL_VARS as readonly string[]).includes(v), `ALL_VARS missing ${v}`);
 });

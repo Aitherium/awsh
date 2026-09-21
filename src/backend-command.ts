@@ -64,6 +64,10 @@ export const ALL_VARS = [
   // Tool search is OFF by default behind a custom ANTHROPIC_BASE_URL; every non-default
   // profile must set it explicitly or the session loses MCP tools.
   'ENABLE_TOOL_SEARCH',
+  // 2026-09-19: the CLI's Artifact tool schema is rejected by strict third-party
+  // validators (DeepSeek: 400 "Invalid schema for function 'Artifact'"), killing every
+  // turn. Non-Anthropic profiles set it to "1"; managed so `use anthropic` clears it.
+  'CLAUDE_CODE_DISABLE_ARTIFACT',
 ] as const;
 
 const BUILTIN_PROFILES: BackendProfiles = {

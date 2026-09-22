@@ -76,8 +76,11 @@ function usage(): void {
   aither harness list                       live sessions
   aither harness harnesses                  what this box can drive
   aither harness agents                     sovereign agent roster
+  aither harness skills                     skills and slash commands a session can be handed
+                                            (<cwd>/.claude then ~/.claude)
   aither harness new [--harness claude|claude-tty|terminal…] [--model-profile deepseek-flash]
                      [--cwd .] [--title T] [--agent atlas] [--target <container>]
+                     [--skill gauntlet] [--skill-arguments "…"]   (see: aither harness skills)
                      [--extra-args "--flag,--flag2"]   (claude-tty/terminal argv)
   aither harness send <id> <text…>
   aither harness attach <id>                follow the event stream
@@ -202,6 +205,19 @@ export async function runHarnessCommand(args: string[]): Promise<number> {
         }
         return 0;
       }
+      case 'skills': {
+        const cwd = flag(args, 'cwd', process.cwd());
+        const r = await api<{ skills: any[]; collisions?: Record<string, string[]> }>(
+          `/skills?cwd=${encodeURIComponent(cwd)}`,
+        );
+        for (const s of r.skills) {
+          console.log(`${s.name.padEnd(28)} ${s.kind.padEnd(8)} ${String(s.description).slice(0, 70)}`);
+        }
+        for (const [name, paths] of Object.entries(r.collisions || {})) {
+          console.log(`collision ${name}: ${paths.join(' | ')}`);
+        }
+        return 0;
+      }
       case 'agents': {
         const r = await api<{ agents: any[] }>('/agents');
         for (const a of r.agents) console.log(`${a.id.padEnd(12)} ${a.label.padEnd(14)} ${a.role}`);
@@ -228,6 +244,12 @@ export async function runHarnessCommand(args: string[]): Promise<number> {
           agent: flag(args, 'agent'),
           target: flag(args, 'target'),
         };
+        const skill = flag(args, 'skill');
+        if (skill) {
+          body.skill = skill;
+          const skillArgs = flag(args, 'skill-arguments');
+          if (skillArgs) body.skill_arguments = skillArgs;
+        }
         const profile = flag(args, 'model-profile');
         if (profile) body.model_profile = profile;
         const extra = flag(args, 'extra-args');

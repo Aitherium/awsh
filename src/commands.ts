@@ -795,6 +795,37 @@ const COMMANDS: Record<string, Command> = {
     },
   },
 
+  skills: {
+    description: 'Skills reachable from here: host daemon | genesis | drift',
+    handler: async (client) => {
+      const spinner = ora('Counting skills...').start();
+      // host: the harness daemon reads <cwd>/.claude and ~/.claude; genesis: the
+      // fleet plane (assets/skills + the mounted .claude/skills). Drift = names on
+      // the host that genesis does not list -- a skill a person wrote that no
+      // agent outside Claude Code can be handed.
+      let host: string[] = [];
+      let genesis: string[] | null = null;
+      try {
+        const { api } = await import('./harness-client.js');
+        const r = await api<{ skills: any[] }>(`/skills?cwd=${encodeURIComponent(process.cwd())}`);
+        host = (r?.skills || []).map((s: any) => String(s.name || s.id || s));
+      } catch {}
+      try {
+        const g = await client.get('/skills');
+        const items = Array.isArray(g) ? g : (g?.skills || null);
+        genesis = items ? items.map((s: any) => String(s.name || s.skill_name || s.id || s)) : null;
+      } catch {}
+      spinner.stop();
+      const gset = new Set(genesis || []);
+      const drift = genesis ? host.filter((n) => !gset.has(n)) : null;
+      console.log(
+        `  host ${host.length} | genesis ${genesis ? genesis.length : 'unreachable'} | ` +
+        `drift ${drift ? drift.length : 'n/a'}`,
+      );
+      if (drift && drift.length) console.log(chalk.dim('  not on the fleet plane: ' + drift.slice(0, 12).join(', ')));
+      if (!host.length && !genesis) console.log(chalk.dim('  neither the harness daemon (:8362) nor genesis answered'));
+    },
+  },
   agents: {
     description: 'List registered agents',
     handler: async (client) => {

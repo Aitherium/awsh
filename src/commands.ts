@@ -2392,12 +2392,16 @@ const COMMANDS: Record<string, Command> = {
 
       if (sub === 'remember' && text) {
         const spinner = ora('Storing memory...').start();
-        const result = await client.post('/memory/remember', { text, source: 'aither-shell' });
+        // Genesis serves tenant memory under /external (routers/external.py);
+        // MemoryRequest takes `content`, and the tenant comes from the caller.
+        const result = await client.postDetailed('/external/memory/remember', { content: text, category: 'aither-shell' });
         spinner.stop();
-        console.log(result?.stored ? chalk.green('  Memory stored.') : chalk.yellow('  ' + (result?.message || 'Could not store.')));
+        console.log(result?.status === 'remembered'
+          ? chalk.green('  Memory stored.')
+          : chalk.yellow('  ' + (result?.error || result?.detail || 'Could not store.')));
       } else if (sub === 'recall' && text) {
         const spinner = ora('Recalling...').start();
-        const result = await client.post('/memory/recall', { query: text, limit: 5 });
+        const result = await client.post('/external/memory/recall', { query: text });
         spinner.stop();
         const memories = result?.memories || result?.results || [];
         if (!memories.length) { console.log(chalk.dim('  No memories found.')); return; }

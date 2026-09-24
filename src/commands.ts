@@ -392,6 +392,69 @@ const COMMANDS: Record<string, Command> = {
       }
     },
   },
+  link: {
+    description: 'Link this machine to aitherium.com (one sign-in for awsh, awdesk and adk)',
+    usage: '/link | /link status',
+    handler: async (_client, args, _config) => {
+      // SHELLS OUT to `adk link` (awdk), like /publish-preflight: the device
+      // grant, the sign-in shared with adk and awdesk, and the role-aware
+      // bundle (platform owner vs everyone else) live in ONE implementation.
+      const runJson = (argv: string[]) => new Promise<any>((resolve) => {
+        const tryBin = (bin: string, fallback?: string) => {
+          let out = '';
+          const child = spawn(bin, ['link', ...argv, '--json'], { shell: false });
+          child.stdout?.on('data', (d) => { out += String(d); });
+          child.on('error', () => (fallback ? tryBin(fallback) : resolve(null)));
+          child.on('close', () => {
+            try { resolve(JSON.parse(out.trim() || 'null')); } catch { resolve({ ok: false, error: out.trim().slice(0, 200) || 'no output' }); }
+          });
+        };
+        tryBin('adk', 'awdk');
+      });
+      const describe = (st: any) => {
+        if (!st) return chalk.yellow('  adk is not on PATH -- pip install awdk');
+        if (st.linked) {
+          const who = st.username || 'your account';
+          return st.role === 'owner'
+            ? chalk.green(`  linked as ${who} -- platform owner (full endpoint and vault map)`)
+            : chalk.green(`  linked as ${who}`);
+        }
+        return st.signed_in
+          ? chalk.yellow('  signed in locally, not linked to aitherium.com -- run /link')
+          : chalk.yellow('  not linked -- run /link');
+      };
+
+      if (args.trim().toLowerCase() === 'status') {
+        console.log(describe(await runJson(['status'])));
+        return;
+      }
+      const start = await runJson(['start']);
+      if (!start || !start.ok) {
+        console.log(chalk.red(`  could not start: ${start ? start.error : 'adk is not on PATH'}`));
+        return;
+      }
+      console.log(chalk.cyan(`  Approve this machine: ${start.approve_url}`));
+      console.log(chalk.cyan(`  code ${start.user_code} -- waiting...`));
+      const deadline = Date.now() + (start.expires_in || 900) * 1000;
+      let wait = (start.interval || 5) * 1000;
+      while (Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, wait));
+        const p = await runJson(['poll', start.device_code]);
+        if (!p) continue;
+        if (p.status === 'complete') {
+          console.log(describe(await runJson(['status'])));
+          if (p.bundle_error) console.log(chalk.dim(`  (role not fetched yet: ${p.bundle_error})`));
+          return;
+        }
+        if (p.status === 'denied' || p.status === 'expired' || p.status === 'error') {
+          console.log(chalk.red(`  not linked: ${p.error || p.status}`));
+          return;
+        }
+        if (p.status === 'slow_down') wait += 5000;
+      }
+      console.log(chalk.red('  code expired -- run /link again'));
+    },
+  },
   approvals: {
     description: 'Decide A2A permission cards blocking federated agents',
     usage: '/approvals | /approvals approve <id> | /approvals deny <id>',

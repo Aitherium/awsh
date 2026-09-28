@@ -14,6 +14,7 @@ import type { GenesisClient } from './client.js';
 import type { ShellConfig } from './config.js';
 import { getActiveConfig, DEFAULT_AGENT } from './config.js';
 import { getRemoteMcpClient } from './mcp-client.js';
+import { fleetProbeArgv, fleetRecoverPlan, fleetStateIsUp, parseFleetState } from './fleet-recover.js';
 import { getCommandRegistry } from './command-registry.js';
 import { isAdultContentVisible, invalidateAdultGate, ADULT_TIERS } from './adult-gate.js';
 import { formatTable, getSessionArtifacts, clearSessionArtifacts, resolveImagePath, osc8Link, addSessionArtifact, type SessionArtifact } from './renderer.js';
@@ -6987,88 +6988,47 @@ COMMANDS['docker'] = {
         }
 
         case 'recover': {
-          // Recover Docker Desktop from WSL2 500-error hang (no reboot needed)
+          // Targeted fleet-host recovery (src/fleet-recover.ts). NEVER `wsl --shutdown`
+          // or a vmmem/wslservice kill: one utility VM hosts every distro, so either one
+          // kills the whole fleet and detaches its data disk (2026-09-27, awnix).
           console.log();
-          const isHealthy = (() => {
-            try {
-              const r = execSync('docker info 2>&1', { encoding: 'utf-8', timeout: 10000 });
-              return !r.includes('500 Internal Server Error');
-            } catch { return false; }
-          })();
-          if (isHealthy && !rest.includes('--force')) {
-            console.log(chalk.green('  Docker engine is healthy. Use --force to recover anyway.'));
+          if (process.platform !== 'win32') {
+            // wsl.exe and schtasks exist only on Windows. On a native awnix host the
+            // fleet IS this machine; on macOS there is no local fleet host.
+            console.log(chalk.yellow('  Fleet-host recovery is the Windows/WSL path. On a native awnix host use `systemctl --failed` and restart the unit; nothing was changed.'));
             break;
           }
-          console.log(chalk.red('  Docker engine is DOWN. Starting recovery...'));
-          const recoverSteps: [string, string[]][] = [
-            ['[1/5] Killing Docker Desktop...', [
-              'taskkill /F /IM "Docker Desktop.exe" 2>NUL',
-              'taskkill /F /IM "com.docker.backend.exe" 2>NUL',
-              'taskkill /F /IM "com.docker.build.exe" 2>NUL',
-              'taskkill /F /IM "docker-agent.exe" 2>NUL',
-              'taskkill /F /IM "docker-sandbox.exe" 2>NUL',
-            ]],
-            ['[2/5] Shutting down WSL...', ['wsl --shutdown']],
-            ['[3/5] Cleaning up zombie processes...', [
-              'taskkill /F /IM vmmem 2>NUL',
-              'taskkill /F /IM wslservice.exe 2>NUL',
-            ]],
-            ['[4/5] Restarting Docker service...', [
-              'net stop com.docker.service 2>NUL',
-              'net start com.docker.service 2>NUL',
-            ]],
-          ];
-          for (const [label, shellCmds] of recoverSteps) {
+          const probe = (): string => {
+            const [exe, ...args] = fleetProbeArgv();
+            const r = spawnSync(exe, args, { encoding: 'utf-8', timeout: 45000 });
+            return parseFleetState(r.stdout);
+          };
+          const before = probe();
+          if (fleetStateIsUp(before) && !rest.includes('--force')) {
+            console.log(chalk.green(`  Fleet host is ${before}. Use --force to recover anyway.`));
+            break;
+          }
+          console.log(chalk.red(`  Fleet host is ${before}. Starting targeted recovery...`));
+          const plan = fleetRecoverPlan();
+          for (const [label, argv] of plan.slice(0, 2)) {
             console.log(chalk.yellow(`  ${label}`));
-            for (const c of shellCmds) {
-              try { execSync(c, { encoding: 'utf-8', timeout: 15000, stdio: 'pipe' }); } catch {}
-            }
-            await new Promise<void>(r => setTimeout(r, 2000));
+            try { spawnSync(argv[0], argv.slice(1), { encoding: 'utf-8', timeout: 60000, stdio: 'pipe' }); } catch {}
+            await new Promise<void>(r => setTimeout(r, 3000));
           }
-          console.log(chalk.yellow('  [5/5] Starting Docker Desktop...'));
-          spawn('C:\\Program Files\\Docker\\Docker\\Docker Desktop.exe', [], {
-            detached: true, stdio: 'ignore',
-          }).unref();
-          // Wait for engine to come back
-          const recoverSpinner = ora('  Waiting for Docker engine...').start();
-          let recovered = false;
-          for (let elapsed = 5; elapsed <= 90; elapsed += 5) {
-            await new Promise<void>(r => setTimeout(r, 5000));
-            try {
-              const info = execSync('docker info 2>&1', { encoding: 'utf-8', timeout: 10000 });
-              if (!info.includes('500 Internal Server Error')) {
-                recoverSpinner.succeed(chalk.green(`  Docker recovered in ${elapsed}s!`));
-                recovered = true;
-                break;
-              }
-            } catch {}
-          }
-          if (!recovered) {
-            recoverSpinner.fail(chalk.red('  Recovery failed after 90s. You may need to reboot.'));
-            break;
-          }
-          // Clean up dead containers
-          try {
-            const deadContainers = execSync('docker ps -a --filter status=dead --format "{{.Names}}"', {
-              encoding: 'utf-8', timeout: 10000,
-            }).trim();
-            for (const name of deadContainers.split('\n').filter(Boolean)) {
-              console.log(chalk.dim(`  Removing dead: ${name}`));
-              try { execSync(`docker rm -f ${name}`, { timeout: 10000, stdio: 'pipe' }); } catch {}
+          console.log(chalk.yellow(`  ${plan[2][0]}`));
+          const recoverSpinner = ora('  Waiting for systemd in the fleet host...').start();
+          let state = 'unreachable';
+          for (let elapsed = 10; elapsed <= 180; elapsed += 10) {
+            await new Promise<void>(r => setTimeout(r, 10000));
+            state = probe();
+            if (state === 'running' || state === 'degraded') {
+              recoverSpinner.succeed(chalk.green(`  Fleet host ${state} after ${elapsed}s.`));
+              break;
             }
-          } catch {}
-          // Restart exited containers
-          try {
-            const exitedContainers = execSync('docker ps -a --filter status=exited --format "{{.Names}}"', {
-              encoding: 'utf-8', timeout: 10000,
-            }).trim();
-            for (const name of exitedContainers.split('\n').filter(Boolean)) {
-              console.log(chalk.dim(`  Restarting: ${name}`));
-              try { execSync(`docker start ${name}`, { timeout: 10000, stdio: 'pipe' }); } catch {}
-            }
-          } catch {}
-          const finalCount = execSync('docker ps -q', { encoding: 'utf-8', timeout: 5000 }).trim().split('\n').filter(Boolean).length;
-          console.log(chalk.green(`  ${finalCount} containers running`));
+          }
+          if (state !== 'running' && state !== 'degraded') {
+            recoverSpinner.fail(chalk.red(`  Fleet host still '${state}' after 180s. Not escalating to a global WSL shutdown; see AitherOS-WSL-Wedge-Recovery.`));
+          }
           break;
         }
 

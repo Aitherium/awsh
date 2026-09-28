@@ -13,7 +13,7 @@ it is printed at startup, and it comes from the order in
   does **not** fail over. A pin is honoured even when the host is down. Unset
   the pin, or point it somewhere that is up.
 - For a local stack, start either Genesis (`127.0.0.1:8001`) or an ADK agent
-  (`adk run --identity <agent>`, which listens on `127.0.0.1:9001`).
+  (`adk serve --identity <agent>`, which listens on `127.0.0.1:9001`).
 - With no stack at all, use `--gateway` with a key, or a direct provider
   (`--deepseek`, `--kimi`).
 

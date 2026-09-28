@@ -1540,7 +1540,7 @@ async function oneShotChat(
     } else if (msg.includes('Cannot connect') || msg.includes('ECONNREFUSED') || msg.includes('fetch failed')) {
       console.error(chalk.red(`Backend not reachable at ${config.genesisUrl}`));
       console.error(chalk.dim('Start Genesis: docker compose -f docker-compose.aitheros.yml --profile chat-minimal up -d'));
-      console.error(chalk.dim('  Or ADK:    adk run --identity <agent>'));
+      console.error(chalk.dim('  Or ADK:    adk serve --identity <agent>'));
     } else {
       console.error(chalk.red(`Error: ${msg}`));
     }

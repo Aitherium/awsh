@@ -142,7 +142,7 @@ export interface TuiSurface {
   showPicker(title: string, items: PickerItem[], initialFilter?: string): Promise<string | null>;
   /** Show a full-screen scrollable document viewer over pre-rendered lines
    *  (markdown/code/text). Resolves when the user closes it (q/Esc). */
-  showViewer(title: string, lines: string[]): Promise<void>;
+  showViewer(title: string, lines: string[], opts?: ViewerOptions): Promise<void>;
   /** Update the content of an open viewer (live polling). No-op if viewer not open. */
   updateViewer?(lines: string[]): void;
   /** Show a full-screen multi-line text editor seeded with `initialText`.
@@ -170,6 +170,14 @@ export interface TuiSurface {
    *  below a readable width. Render frames at MOST this wide — the avatar is painted raw
    *  over the terminal, so anything wider silently overwrites trace content. */
   maxAvatarCols(): number;
+}
+
+/** Optional input line on a viewer (the sessions cockpit's steer line). */
+export interface ViewerOptions {
+  /** Called with the typed line on Enter; resolves with a one-line status to show. */
+  onSubmit?: (text: string) => Promise<string>;
+  /** Hint shown in the label, e.g. the row's capability tier. */
+  inputHint?: string;
 }
 
 export interface TuiScreenOpts {
@@ -1095,35 +1103,99 @@ export function createTuiScreen(opts: TuiScreenOpts): TuiSurface {
   // chalk ANSI); blessed parses the SGR colour codes itself. Images do NOT come
   // through here — they render via runDetached so 24-bit colour isn't downsampled.
   let viewerBox: any = null;  // Store reference for live updates
-  function showViewer(title: string, lines: string[]): Promise<void> {
+  let viewerRedraw: ((lines: string[]) => void) | null = null;
+  function showViewer(title: string, lines: string[], vopts: ViewerOptions = {}): Promise<void> {
     return new Promise((resolve) => {
       _pickerOpen = true;
+      const canType = typeof vopts.onSubmit === 'function';
+      const baseHint = '↑↓/PgUp/PgDn scroll · g/G top/bottom · q/Esc close';
       const box = blessed.box({
-        parent: screen, label: ` ${title}  —  ↑↓/PgUp/PgDn scroll · g/G top/bottom · q/Esc close `,
+        parent: screen,
+        label: ` ${title}  —  ${canType ? 'i type · ' : ''}${baseHint} `,
         border: 'line', top: 0, left: 0, width: '100%', height: '100%',
         tags: false, scrollable: true, alwaysScroll: true, keys: true, mouse: true,
         scrollbar: { ch: ' ', inverse: true }, wrap: true,
         style: { border: { fg: 'cyan' }, label: { fg: 'cyan' } },
       });
       viewerBox = box;  // Store for updateViewer
+
+      // The input line is driven from the PROGRAM keypress stream (same reason as the
+      // editor: blessed's textarea double-delivers keys on this terminal). While typing,
+      // every box key binding stands down so `q` or `j` is a letter, not a command.
+      let typing = false;
+      let draft = '';
+      let status = '';
+      let body = lines;
+      const redraw = (next?: string[]) => {
+        if (next) body = next;
+        const tail: string[] = [];
+        if (canType && (typing || status)) {
+          tail.push('');
+          if (status) tail.push(chalk.dim(`  ${status}`));
+          if (typing) tail.push(chalk.cyan('› ') + draft + chalk.inverse(' ')
+            + chalk.dim(`   Enter send · Esc cancel${vopts.inputHint ? ` · ${vopts.inputHint}` : ''}`));
+        }
+        try { box.setContent([...body, ...tail].join('\n')); } catch { /* */ }
+        if (typing) { try { box.setScrollPerc(100); } catch { /* */ } }
+        screen.render();
+      };
+      viewerRedraw = redraw;
       box.setContent(lines.join('\n'));
 
+      function inputKey(ch: any, key: any): void {
+        if (!typing) return;
+        const name: string = (key && key.name) || '';
+        if (name === 'escape') {
+          draft = '';
+          // Leave typing on the NEXT tick: the box's own escape binding sees this same
+          // key after us and must not read it as "close the viewer".
+          setImmediate(() => { typing = false; redraw(); });
+          return;
+        }
+        if (name === 'enter' || name === 'return') {
+          const text = draft.trim();
+          draft = '';
+          setImmediate(() => { typing = false; redraw(); });
+          if (!text) return;
+          status = 'sending…';
+          redraw();
+          void vopts.onSubmit!(text).then((msg) => { status = msg; redraw(); },
+            (e) => { status = `steer failed: ${e instanceof Error ? e.message : String(e)}`; redraw(); });
+          return;
+        }
+        if (name === 'backspace') { draft = Array.from(draft).slice(0, -1).join(''); redraw(); return; }
+        if (ch && typeof ch === 'string' && ch >= ' ' && !(key && (key.ctrl || key.meta))) {
+          draft += ch.replace(/[\r\n]+/g, ' ');
+          redraw();
+        }
+      }
+      if (canType) (screen as any).program.on('keypress', inputKey);
+
       function close(): void {
+        if (canType) (screen as any).program.removeListener('keypress', inputKey);
         _pickerOpen = false;
         viewerBox = null;  // Clear reference
+        viewerRedraw = null;
         try { box.destroy(); } catch { /* */ }
         screen.render();
         focusInput();
         resolve();
       }
+      const idle = (fn: () => void) => () => { if (!typing) fn(); };
       const vpage = () => Math.max(1, (box.height as number) - 3);
-      box.key(['q', 'escape', 'C-c'], () => close());
-      box.key(['up', 'k'], () => { box.scroll(-1); screen.render(); });
-      box.key(['down', 'j'], () => { box.scroll(1); screen.render(); });
-      box.key(['pageup'], () => { box.scroll(-vpage()); screen.render(); });
-      box.key(['pagedown', 'space'], () => { box.scroll(vpage()); screen.render(); });
-      box.key(['g', 'home'], () => { box.scrollTo(0); screen.render(); });
-      box.key(['G', 'end'], () => { box.setScrollPerc(100); screen.render(); });
+      box.key(['q', 'escape', 'C-c'], idle(() => close()));
+      box.key(['up', 'k'], idle(() => { box.scroll(-1); screen.render(); }));
+      box.key(['down', 'j'], idle(() => { box.scroll(1); screen.render(); }));
+      box.key(['pageup'], idle(() => { box.scroll(-vpage()); screen.render(); }));
+      box.key(['pagedown', 'space'], idle(() => { box.scroll(vpage()); screen.render(); }));
+      box.key(['g', 'home'], idle(() => { box.scrollTo(0); screen.render(); }));
+      box.key(['G', 'end'], idle(() => { box.setScrollPerc(100); screen.render(); }));
+      if (canType) {
+        // Enter typing on the NEXT tick, whichever listener runs first: the input
+        // listener must see this same `i` with typing still false, or it would
+        // become the first letter of the draft.
+        box.key(['i', '>'], idle(() => { setImmediate(() => { typing = true; status = ''; redraw(); }); }));
+      }
       box.on('wheelup', () => { box.scroll(-3); screen.render(); });
       box.on('wheeldown', () => { box.scroll(3); screen.render(); });
 
@@ -1134,8 +1206,8 @@ export function createTuiScreen(opts: TuiScreenOpts): TuiSurface {
 
   /** Update the content of a live viewer (called from polling, no-op if closed). */
   function updateViewer(lines: string[]): void {
-    if (viewerBox) {
-      try { viewerBox.setContent(lines.join('\n')); screen.render(); } catch { /* */ }
+    if (viewerBox && viewerRedraw) {
+      try { viewerRedraw(lines); } catch { /* */ }
     }
   }
 

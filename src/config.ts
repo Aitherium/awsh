@@ -2,6 +2,7 @@ import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
+import { reconcileTlsForEndpoint } from './tls-trust.js';
 import { getActiveToken, getActiveUser, ensureRootProfile, isRootProvisioningAllowed, type AuthUser } from './auth.js';
 
 export type BackendType = 'genesis' | 'adk' | 'unknown';
@@ -238,8 +239,15 @@ export function roleProvider(
  *  and offer /login instead). Explicit mcp/llm URLs are preserved. */
 export function applyCloudFallback(config: ShellConfig, url: string = CLOUD_URL): void {
   const base = url.replace(/\/+$/, '');
+  // The import-time TLS gate may have relaxed verification for a private
+  // fleet; the bearer/PAT is about to go to a PUBLIC edge, so restore strict TLS
+  // BEFORE anything connects there.
+  reconcileTlsForEndpoint(base);
   config.genesisUrl = base;
-  config.mcpUrl = config.mcpUrl || (base === CLOUD_URL ? CLOUD_MCP_URL : `${base}/mcp`);
+  // A loopback MCP url is the dead local gateway once we fail over;
+  // only a non-loopback explicit mcp_url is preserved.
+  const keepMcp = config.mcpUrl && !isLoopback(config.mcpUrl);
+  config.mcpUrl = keepMcp ? config.mcpUrl : (base === CLOUD_URL ? CLOUD_MCP_URL : `${base}/mcp`);
   config.llmUrl = config.llmUrl || `${base}/v1`;
   config.inferenceMode = 'raw';       // cloud edge = raw /v1, no local Genesis pipeline
   config.backendType = 'adk';         // gateway/OpenAI-compatible code path

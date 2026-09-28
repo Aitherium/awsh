@@ -194,3 +194,15 @@ test('buildSessionsPanel: multiple statuses create distinct output', () => {
   // Both waiting states should appear
   assert.ok(output.includes('waiting'));
 });
+
+test('sessionStatusTone: the statuses the daemon actually emits are coloured', async () => {
+  const { sessionStatusTone } = await import('../src/tui/sessions-view.js');
+  // session_directory.py emits `exited` (state exited/failed) and `blocked?`.
+  assert.equal(sessionStatusTone('exited'), 'error');
+  assert.equal(sessionStatusTone('failed'), 'error');
+  assert.equal(sessionStatusTone('blocked?'), 'warn');
+  assert.equal(sessionStatusTone('waiting-input'), 'warn');
+  assert.equal(sessionStatusTone('working'), 'accent');
+  assert.equal(sessionStatusTone('idle'), 'muted');
+  assert.equal(sessionStatusTone('something-new'), 'text');
+});

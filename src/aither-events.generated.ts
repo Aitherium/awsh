@@ -125,6 +125,7 @@ export const SHELL_EVENT_PILLARS: Record<string, Pillar> = {
   'artifact_delivered': 'automation',
   'kernel.node_started': 'automation',
   'kernel.node_ready': 'automation',
+  'outcome_recorded': 'learning',
 };
 
 /** FluxEmitter EventType value -> pillar. Partial by design; see the Python doc. */
@@ -182,6 +183,8 @@ export const FLUX_PILLARS: Record<string, Pillar> = {
   'day.w': 'learning',
   'user.feedback': 'learning',
   'user.bug_report': 'learning',
+  'evolution.task_outcome': 'learning',
+  'evolution.quality_regression': 'learning',
   'svc.r': 'automation',
   'svc.e': 'automation',
   'gpu.ml': 'automation',
@@ -193,10 +196,27 @@ export const FLUX_PILLARS: Record<string, Pillar> = {
   'gpu.aq': 'automation',
   'msh.j': 'automation',
   'msh.l': 'automation',
+  '6p.i': 'intent',
+  '6p.r': 'reasoning',
+  '6p.cr': 'automation',
+  '6p.o': 'orchestration',
+  '6p.l': 'learning',
+  '6p.h': 'context',
   'retr.q': 'context',
   'retr.e': 'orchestration',
   'retr.i': 'learning',
   'retr.p': 'learning',
+  'context.token_scale_calculated': 'context',
+  'context.segment_added': 'context',
+  'context.segment_loaded': 'context',
+  'context.segment_unloaded': 'context',
+  'context.segment_evicted': 'context',
+  'context.cache_assembled': 'context',
+  'context.cache_cleared': 'context',
+  'context.cache_injected': 'context',
+  'context.injected': 'context',
+  'context.weeded': 'context',
+  'context.quick_recall': 'context',
 };
 
 /** SixPillarsKernel tick phase -> pillar. P5 is 'Creation' there, Automation here. */

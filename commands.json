@@ -59,6 +59,14 @@
       ]
     },
     {
+      "name": "command",
+      "category": "core",
+      "description": "Send text to the awdesk Command agent and print its reply",
+      "aliases": [
+        "do"
+      ]
+    },
+    {
       "name": "dev",
       "category": "core",
       "description": "Manage dev environments (sandbox + AI agent)",

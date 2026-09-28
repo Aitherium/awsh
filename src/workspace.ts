@@ -240,14 +240,6 @@ export function removeProject(name: string): void {
 }
 
 /**
- * Get the context content for a turn (prepended to system prompt).
- * Returns empty string if no project is active.
- */
-export function getWorkspaceContext(): string {
-  return _activeWorkspace.context?.fullContent || '';
-}
-
-/**
  * Interactive directory browser for workspace selection.
  * Allows arrow-key navigation through the directory tree.
  * Returns the selected directory path, or null if cancelled.

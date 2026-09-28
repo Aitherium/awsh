@@ -17,6 +17,7 @@
     "dist/**/*.js",
     "dist/**/*.d.ts",
     "dist/**/*.js.map",
+    "commands.json",
     "package.json",
     "README.md"
   ],

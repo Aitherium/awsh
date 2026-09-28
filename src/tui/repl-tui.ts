@@ -23,6 +23,7 @@ import type { ShellConfig } from '../config.js';
 import { setActiveConfig } from '../config.js';
 import { getCommand, getCommandNames } from '../commands.js';
 import { getCommandRegistry } from '../command-registry.js';
+import { resolveFallback, runFallback, formatFallbackOutput } from '../command-fallback.js';
 import {
   loadAgentNames, resolveAgentMention, completer, refreshCommandCompletions, SUBCOMMAND_DEFS,
 } from '../completions.js';
@@ -51,7 +52,12 @@ import { buildNeuronPanel, emptyNeuronState } from './neuron-activity-view.js';
 import { buildReasoningPanel } from './reasoning-stream-view.js';
 import { buildKnowledgeGraph } from './knowledge-graph-overlay.js';
 import { buildSessionsPanel } from './sessions-view.js';
-import { fetchUnifiedSessions } from '../sessions-client.js';
+import { steerFocusedSession, steerPlan } from '../session-steer.js';
+import {
+  fetchSessionsWithFallback, readTail, resolveSessionTarget, routeSessionsCommand, transcriptTurns,
+  type UnifiedSession,
+} from '../sessions-client.js';
+import { createChatFormatter } from './chat-formatter.js';
 import { buildRoomPanel } from './room-view.js';
 import { buildStoragePanel, type StoragePanelSnapshot } from './storage-view.js';
 import { getStorageNodes } from '../storage-client.js';
@@ -329,24 +335,11 @@ export async function startTuiRepl(client: GenesisClient, config: ShellConfig): 
       let lastError: string | null = null;
 
       async function renderSessions(): Promise<string[]> {
-        try {
-          const sessions = await fetchUnifiedSessions();
-          lastError = null;
-          return buildSessionsPanel(sessions, w);
-        } catch (e: any) {
-          const msg = e instanceof Error ? e.message : String(e);
-          lastError = msg;
-          // Check if it's a daemon-down error
-          if (/no harness token|fetch failed|ECONNREFUSED/i.test(msg)) {
-            return [
-              chalk.red('Sessions — daemon not reachable'),
-              chalk.dim('  start it with:  adk harness serve'),
-              '',
-              chalk.dim('  Ctrl+S to retry'),
-            ];
-          }
-          return [chalk.red(`sessions error: ${msg}`)];
-        }
+        // Never throws: a down daemon falls back to reading Claude Code's own
+        // state files + transcripts, rendered view-only (cap = none).
+        const snap = await fetchSessionsWithFallback();
+        lastError = snap.daemonError ?? null;
+        return buildSessionsPanel(snap.sessions, w, { source: snap.source, daemonError: snap.daemonError });
       }
 
       // Render once, then set up polling
@@ -1422,10 +1415,34 @@ export async function startTuiRepl(client: GenesisClient, config: ShellConfig): 
     if (name === 'steer') { await handleJobs(`steer ${args}`); return; }
     if (name === 'cancel') { await handleJobs(`cancel ${args}`); return; }
     if (name === 'relay') { await handleRelay(args); return; }
+    if (name === 'sessions') {
+      // `/sessions` is the cockpit (same overlay as Ctrl+S). The saved-trace
+      // listing it used to reach stays available as `/sessions traces`.
+      const route = routeSessionsCommand(args);
+      if (route.kind === 'cockpit') { await openOverlay('sessions'); return; }
+      if (route.kind === 'focus') { await focusSession(route.target); return; }
+      if (route.kind === 'traces') {
+        const traces = getCommand('sessions');
+        if (traces) await surface.runDetached('sessions', async () => { await traces.handler(client, route.args, config); });
+        idleStatus();
+        return;
+      }
+    }
     if ((name === 'leave' || name === 'unrelay') && relay) { leaveRelay(); return; }
 
     const cmd = getCommand(name);
     if (!cmd) {
+      // Same catalog fallback as the readline REPL: discovered MCP tools and
+      // Genesis @shell_command routes run instead of "Unknown command".
+      const fallback = resolveFallback(registry, name);
+      if (fallback) {
+        surface.setStatus(`calling /${name}…`);
+        const res = await runFallback(client, fallback, args, config);
+        surface.outputLine(chalk.cyan(`[${res.label}]`));
+        const text = res.ok ? formatFallbackOutput(res.output) : chalk.red(`/${name} failed: ${res.error}`);
+        for (const line of text.split('\n')) surface.outputLine(line);
+        idleStatus(); surface.focusInput(); return;
+      }
       surface.outputLine(chalk.yellow(`Unknown command: ${name}`) + chalk.dim('  (/ picker, or AITHER_TUI=0 for full UX)'));
       surface.focusInput(); return;
     }
@@ -1456,6 +1473,57 @@ export async function startTuiRepl(client: GenesisClient, config: ShellConfig): 
       await cmd.handler(client, finalArgs, config);
     });
     idleStatus();
+  }
+
+  /**
+   * Focus one session: a live tail of its transcript, rendered through the chat
+   * formatter and refreshed every second while the viewer is open. With no
+   * target, a picker over the current roster chooses one.
+   */
+  async function focusSession(target: string): Promise<void> {
+    const snap = await fetchSessionsWithFallback();
+    let chosen: UnifiedSession | undefined = target ? resolveSessionTarget(snap.sessions, target) : undefined;
+    if (!chosen) {
+      if (!snap.sessions.length) { surface.outputLine(chalk.yellow('No sessions to focus.')); surface.focusInput(); return; }
+      if (target) surface.outputLine(chalk.yellow(`No single session matches "${target}" — pick one:`));
+      const picked = await surface.showPicker('Focus session', snap.sessions.map((s, i) => ({
+        label: `${i + 1}. ${s.title}`, value: s.id, description: `${s.status} · ${s.last_activity_summary}`,
+      })));
+      chosen = picked ? snap.sessions.find((s) => s.id === picked) : undefined;
+      if (!chosen) { surface.focusInput(); return; }
+    }
+    const session = chosen;
+    const w = Math.max(30, (process.stdout.columns || 100) - 6);
+    const fmt = createChatFormatter({ paneWidth: w });
+    const render = (): string[] => {
+      const head = [
+        chalk.cyan(session.title),
+        chalk.dim(`  ${session.cwd}${session.branch ? ` · ${session.branch}` : ''} · ${session.status} · cap ${session.steer_capability}`),
+        '',
+      ];
+      if (!session.transcript_path) return [...head, chalk.dim('  (no transcript for this session)')];
+      const body: string[] = [];
+      for (const t of transcriptTurns(readTail(session.transcript_path))) {
+        if (t.role === 'user') body.push(chalk.bold('› ') + t.text.split('\n')[0].slice(0, w - 4));
+        else if (t.role === 'tool') body.push(chalk.dim(`  ⚙ ${t.text}`));
+        else body.push(...fmt.formatAnswer(t.text));
+      }
+      return [...head, ...body];
+    };
+    const timer = setInterval(() => {
+      try { surface.updateViewer?.(render()); } catch { /* keep the last good frame */ }
+    }, 1000);
+    try {
+      // The input line (press i) steers THIS session per its capability tier, over the
+      // same steering-event path as `aither harness tell`.
+      const plan = steerPlan(session);
+      await surface.showViewer(`Focus · ${session.title}`, render(), {
+        onSubmit: async (text) => (await steerFocusedSession(session, text)).message,
+        inputHint: plan.note,
+      });
+    } finally {
+      clearInterval(timer);
+    }
   }
 
   function bgForge(args: string): void {

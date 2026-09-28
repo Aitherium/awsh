@@ -28,8 +28,8 @@ run `dist/main.js`. TypeScript, ESM, Node >= 18.
   PowerShell 7 — both local, both work mid-generation. Anything else typed
   during a generation STEERS the running turn; it is not queued.
 - **Context files**: `src/context-loader.ts` reads `CLAUDE.md` / `AGENTS.md` /
-  `AITHER.md` + `.claude/rules/*.md` on `/project switch`. `getWorkspaceContext()`
-  in `src/workspace.ts` has NO caller — a dead path; do not fix prompt bugs there.
+  `AITHER.md` + `.claude/rules/*.md` on `/project switch`. They do NOT reach the
+  model prompt: the dead `getWorkspaceContext()` helper was deleted; do not revive it.
 - **The model prompt** is the pack's `system_prompt` sent as `system_additions`
   (a list) in `src/client.ts`; `test/pack-prompt-reaches-model.test.ts` pins it.
 

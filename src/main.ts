@@ -16,6 +16,7 @@
 // and helps any service that IS chain-issued).
 import { existsSync } from 'fs';
 import { resolveActingIdentity } from './auth.js';
+import { isPrivateHost, relaxTlsForPrivateTrustDomain } from './tls-trust.js';
 import { join, basename } from 'path';
 const _caChainPaths = [
   join(process.env.HOME || process.env.USERPROFILE || '', '.aither', 'tls', 'ca-chain.pem'),
@@ -25,15 +26,9 @@ const _caChainPaths = [
 const _caChain = _caChainPaths.find(p => p && existsSync(p));
 if (_caChain) process.env.NODE_EXTRA_CA_CERTS = _caChain;
 
-const _isPrivateHost = (url: string): boolean => {
-  try {
-    const h = new URL(url).hostname;
-    return h === 'localhost' || h === '127.0.0.1' || h === '::1' ||
-      /^10\./.test(h) || /^192\.168\./.test(h) ||
-      /^172\.(1[6-9]|2\d|3[01])\./.test(h) ||
-      h.endsWith('.local') || h.endsWith('.internal');
-  } catch { return true; } // unparseable → assume local dev
-};
+// unparseable → assume local dev. The decision is TRACKED (tls-trust.ts): a later
+// failover to a public edge restores strict verification.
+const _isPrivateHost = (url: string): boolean => isPrivateHost(url, true);
 
 // Gather EVERY endpoint the shell may actually talk to — env vars AND the
 // saved ~/.aither/shell.yaml (where the endpoint usually lives; env is rarely
@@ -68,8 +63,7 @@ const _endpoints = [
 // self-signed SECONDARY under strict TLS at worst shows "down" in the banner
 // (cosmetic) — never a credential leak. Explicit override always wins.
 const _allPrivate = _endpoints.length > 0 && _endpoints.every(_isPrivateHost);
-if (process.env.NODE_TLS_REJECT_UNAUTHORIZED == null && _allPrivate) {
-  process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
+if (_allPrivate && relaxTlsForPrivateTrustDomain()) {
   // Node then screams a 3-line all-caps security warning as the FIRST thing the
   // user sees on every single launch — noise, and alarming out of context, since
   // this branch only runs when EVERY endpoint is the private self-signed trust
@@ -183,7 +177,7 @@ async function main() {
   // never reach a subcommand's own help — the flag was swallowed before dispatch. Subcommands
   // that print their own usage opt in here; everything else keeps the old behaviour exactly,
   // so this cannot regress a command that has no help of its own.
-  const HELP_AWARE = new Set(['bonsai', 'storage', 'claude']);
+  const HELP_AWARE = new Set(['bonsai', 'storage', 'claude', 'ops', 'backups']);
   if ((args.includes('--help') || args.includes('-h')) && !HELP_AWARE.has((args[0] || '').toLowerCase())) {
     printUsage();
     return;
@@ -221,8 +215,22 @@ async function main() {
       if (r.ok) console.log('  Open a NEW tab for it to take effect.');
       process.exit(r.ok ? 0 : 1);
     }
+    // `awsh init terminal-wrap` -- opt-in: add a Windows Terminal profile whose tabs
+    // are daemon-owned Claude Code sessions (`awsh harness wrap claude`).
+    if (want === 'terminal-wrap') {
+      const { installDaemonTabProfile } = await import('./terminal-install.js');
+      const lad = process.env.LOCALAPPDATA || '';
+      if (!lad) {
+        console.error('  LOCALAPPDATA is not set - this install is Windows-only.');
+        process.exit(2);
+      }
+      const r = installDaemonTabProfile(lad);
+      console.log((r.ok ? '  ok  ' : '  FAILED  ') + r.message);
+      if (r.path) console.log('  ' + r.path);
+      process.exit(r.ok ? 0 : 1);
+    }
     if (!want || !(INIT_SHELLS as readonly string[]).includes(want)) {
-      console.error(`  Usage: awsh init <${INIT_SHELLS.join('|')}|terminal>`);
+      console.error(`  Usage: awsh init <${INIT_SHELLS.join('|')}|terminal|terminal-wrap>`);
       console.error('');
       console.error('  PowerShell   awsh init pwsh | Out-String | Invoke-Expression');
       console.error('  bash/zsh     eval "$(awsh init bash)"');
@@ -840,6 +848,15 @@ $rows | ForEach-Object { [Console]::Out.WriteLine("PATH=" + $_) }`;
   const PY_SHELL_CMDS = new Set([
     'sessions', 'hq', 'inbox', 'palette', 'brief', 'watch', 'agents', 'docker',
   ]);
+  // `aither sessions live|cockpit|--live|--watch` is the unified cockpit (the Ctrl+S
+  // overlay) rendered on this terminal; every other `sessions` verb stays Python's.
+  if (args[0] && args[0].toLowerCase() === 'sessions') {
+    const { wantsSessionsCockpit, runSessionsCockpit } = await import('./sessions-command.js');
+    if (wantsSessionsCockpit(args.slice(1))) {
+      process.exitCode = await runSessionsCockpit(args.slice(1));
+      return;
+    }
+  }
   if (args[0] && PY_SHELL_CMDS.has(args[0].toLowerCase())) {
     const { spawnSync } = await import('node:child_process');
     const runs = process.platform === 'win32'
@@ -917,6 +934,16 @@ $rows | ForEach-Object { [Console]::Out.WriteLine("PATH=" + $_) }`;
     return;
   }
 
+  // `aither ops …` / `aither backups …` — the platform control plane (Genesis
+  // /platform/ops/v1). Like `storage` it needs Genesis but no chat-backend detection.
+  if (args[0] && ['ops', 'backups'].includes(args[0].toLowerCase())) {
+    const { runOpsCommand } = await import('./ops-command.js');
+    const rest = args.slice(1);
+    const argv = args[0].toLowerCase() === 'backups' ? ['backups', ...(rest.length ? rest : ['state'])] : rest;
+    process.exitCode = await runOpsCommand(argv, client);
+    return;
+  }
+
   // `aither well` — draw the ambient context: branch, changes, file locks, agents.
   // Like `harness` and `room`, this is intercepted before backend resolution because
   // the well daemon is a host process that survives when the fleet does not.
@@ -935,6 +962,16 @@ $rows | ForEach-Object { [Console]::Out.WriteLine("PATH=" + $_) }`;
   if (args[0] && args[0].toLowerCase() === 'claude') {
     const { runClaudeCommand } = await import('./claude-command.js');
     process.exitCode = await runClaudeCommand(args.slice(1));
+    return;
+  }
+
+  // `aither solve …` — run the reasoning loop (adk.reasoning.solve). Intercepted before
+  // backend resolution like `claude`: the loop picks its own model through the adk CLI
+  // (--tier / --backend), so waiting on Genesis would only add a failure mode. It shells
+  // out to `python -m adk.cli solve` and exits with the child's code — see solve-command.ts.
+  if (args[0] && args[0].toLowerCase() === 'solve') {
+    const { runSolveCommand } = await import('./solve-command.js');
+    process.exitCode = await runSolveCommand(args.slice(1));
     return;
   }
 
@@ -1503,7 +1540,7 @@ async function oneShotChat(
     } else if (msg.includes('Cannot connect') || msg.includes('ECONNREFUSED') || msg.includes('fetch failed')) {
       console.error(chalk.red(`Backend not reachable at ${config.genesisUrl}`));
       console.error(chalk.dim('Start Genesis: docker compose -f docker-compose.aitheros.yml --profile chat-minimal up -d'));
-      console.error(chalk.dim('  Or ADK:    adk serve --identity <agent>'));
+      console.error(chalk.dim('  Or ADK:    adk run --identity <agent>'));
     } else {
       console.error(chalk.red(`Error: ${msg}`));
     }
@@ -1550,7 +1587,7 @@ ${chalk.bold('One-shot flags:')}
 
 ${chalk.bold('Portable gateway mode (run anywhere with internet + an aither_sk_live_* key):')}
       --gateway [url]             Point inference + MCP tools at the public gateway
-                                  (default https://mcp.aitherium.com); forces raw inference
+                                  (default https://gateway.aitherium.com); forces raw inference
       --inference-mode <mode>     auto (default) | genesis (orchestrated pipeline) |
                                   raw (bypass Genesis → model direct via gateway/MicroScheduler)
                                   Env: AITHER_GATEWAY_URL, AITHER_INFERENCE_MODE, AITHER_MCP_URL,
@@ -1584,9 +1621,9 @@ ${chalk.bold('Auth:')}
   In-shell: /login · /whoami · /logout   (remote endpoints require sign-in)
 
 ${chalk.bold('TUI:')}
-  Interactive mode defaults to the blessed 3-pane TUI: seamless answer pane (left) +
-  collapsible per-turn trace threads (right; Ctrl+E expand/collapse, click a header to toggle).
-  AITHER_TUI=0 falls back to the native readline shell (line editing, history, paste).
+  Interactive mode defaults to the native line-mode shell (line editing, history, paste).
+  AITHER_TUI=1 opts into the blessed 3-pane TUI: answer pane (left) + collapsible
+  per-turn trace threads (right; Ctrl+E expand/collapse, click a header to toggle).
   AITHER_STEER=1 enables the fixed bottom steering bar (limits terminal scrollback).
 
 ${chalk.bold('Quick actions:')}
@@ -1595,6 +1632,8 @@ ${chalk.bold('Quick actions:')}
                                   show up at api.aitherium.com/code
                                   [--node-class laptop] [--once]
   aither storage nodes             Storage inventory: nodes, drives, freshness
+  aither ops backups verify        Platform ops (dry run unless --apply)
+                                  [k=v] [--apply] [--agent genesis] [--watch]
   aither claude "<task>"          Hand a task to a scoped Claude Code subagent
                                   [--allow Read,Grep] [--budget 0.25] [--timeout 300] [--goal <id>]
   aither -c gaming                Toggle gaming mode (free VRAM for games)

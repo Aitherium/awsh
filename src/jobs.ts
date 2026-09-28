@@ -17,6 +17,7 @@
 import chalk from 'chalk';
 import { stripFenceDelimiters } from './tui/chat-formatter.js';
 import type { GenesisClient, SSEEvent, StreamChatOpts } from './client.js';
+import type { StreamPump } from './stream-pump.js';
 
 /** Server-backed expedition (durable job). */
 export interface ServerExpedition {
@@ -49,6 +50,10 @@ export interface Job {
   output: string[];         // Captured output lines
   error: string | null;
   abortController: AbortController | null;
+  /** Set for a foreground chat suspended with Ctrl+Z; `/fg` takes it back. */
+  pump?: StreamPump | null;
+  /** The full prompt of a suspended chat, for the turn record on /fg. */
+  prompt?: string;
 }
 
 type NotifyFn = (job: Job) => void;
@@ -292,6 +297,79 @@ export function launchChatJob(
   });
 
   return job;
+}
+
+/* ── Suspended foreground chat (Ctrl+Z / /fg) ──────────────── */
+
+/**
+ * Adopt a foreground chat stream that the user suspended with Ctrl+Z. The
+ * pump keeps consuming the SAME SSE connection (nothing is re-sent); when it
+ * ends, the job's output is built from every event it saw. `/fg` removes the
+ * job again via takeStreamJob(), so a stream that finishes in the foreground
+ * never reports as a background completion.
+ */
+export function adoptStreamJob(
+  pump: StreamPump,
+  label: string,
+  abortController: AbortController | null,
+  prompt?: string,
+): Job {
+  const job = createJob('chat', label);
+  job.abortController = abortController;
+  job.pump = pump;
+  job.prompt = prompt ?? label;
+
+  pump.finished.then(() => {
+    // Taken back to the foreground (or already cancelled): not ours to finish.
+    if (jobs.get(job.id) !== job || job.pump !== pump || job.status !== 'running') return;
+    const contentParts: string[] = [];
+    let fullAnswer = '';
+    for (const event of pump.events as unknown as SSEEvent[]) {
+      const content = extractContentFromEvent(event);
+      if (content) {
+        if (event.type === 'token') contentParts.push(content);
+        else fullAnswer = content;
+      }
+      const trace = extractTraceFromEvent(event);
+      if (trace) job.output.push(trace);
+    }
+    const finalContent = fullAnswer || contentParts.join('');
+    if (finalContent) {
+      job.output.push('---');
+      job.output.push(finalContent);
+    }
+    job.pump = null;
+    const err: any = pump.error;
+    if (!err) finishJob(job, 'completed');
+    else if (err?.name === 'AbortError') finishJob(job, 'cancelled');
+    else finishJob(job, 'failed', err?.message || String(err));
+  });
+  return job;
+}
+
+/** Most recent running job that can be brought to the foreground, if any. */
+export function latestStreamJobId(): number | null {
+  for (const job of listJobs()) {
+    if (job.status === 'running' && job.pump) return job.id;
+  }
+  return null;
+}
+
+/**
+ * `/fg <id>`: detach a suspended chat from the job table and hand its pump and
+ * abort controller back to the caller, which re-attaches a renderer.
+ */
+export function takeStreamJob(
+  id: number,
+): { pump: StreamPump; abortController: AbortController | null; label: string; prompt: string } | string {
+  const job = jobs.get(id);
+  if (!job) return `No job #${id}.`;
+  if (!job.pump) return `Job #${id} is not a suspended chat (only Ctrl+Z'd chats can be foregrounded).`;
+  if (job.status !== 'running') return `Job #${id} already ${job.status} -- /jobs ${id} shows its output.`;
+  const out = { pump: job.pump, abortController: job.abortController, label: job.label, prompt: job.prompt ?? job.label };
+  job.pump = null;
+  jobs.delete(id);
+  return out;
 }
 
 /* ── Background forge ──────────────────────────────────────── */

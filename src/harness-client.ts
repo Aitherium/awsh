@@ -89,6 +89,10 @@ function usage(): void {
                                             a unique prefix of either, or a unique title word.
                                             Lands now in a tab awsh opened; at the end of the
                                             current turn in any other tab.
+  aither harness wrap [claude|terminal|<harness>] [--cwd .] [--title T] [--model-profile P]
+                                            start a daemon-owned pty session and put THIS
+                                            terminal on it (claude -> claude-tty). Closing
+                                            the tab does not end it; Ctrl+] detaches.
   aither harness kill <id>
 
 Sessions live in the daemon (adk harness serve), so one started here is the
@@ -132,6 +136,50 @@ export function tellEvent(targetId: string, text: string, room = 'main'): Record
     actor: { kind: 'human', id: 'owner', name: 'the owner (awsh)' },
     payload: { text, source: 'awsh:tell' },
   };
+}
+
+/**
+ * Harnesses whose PTY twin `wrap` launches. `claude` alone is the stream-json harness
+ * (turns, no TUI); a wrapped TAB must be the real terminal UI, which is `claude-tty`.
+ */
+const WRAP_PTY_TWIN: Record<string, string> = { claude: 'claude-tty' };
+
+/** Pure: the POST /sessions body for `aither harness wrap <harness> …`. */
+export function wrapSessionBody(args: string[], cwd: string): Record<string, unknown> {
+  const positional = args.find((a, i) => !a.startsWith('--') && !(i > 0 && args[i - 1].startsWith('--')));
+  const asked = (positional || flag(args, 'harness', 'claude')).toLowerCase();
+  const harness = WRAP_PTY_TWIN[asked] || asked;
+  const where = flag(args, 'cwd', cwd);
+  const title = flag(args, 'title') || where.split(/[\\/]/).filter(Boolean).pop() || harness;
+  const body: Record<string, unknown> = { harness, cwd: where, title };
+  const profile = flag(args, 'model-profile');
+  if (profile) body.model_profile = profile;
+  return body;
+}
+
+export interface WrapDeps {
+  api?: <T>(path: string, init?: RequestInit) => Promise<T>;
+  attach?: (id: string) => Promise<number>;
+  log?: (line: string) => void;
+}
+
+/**
+ * `aither harness wrap <harness>`: spawn a daemon-owned session and attach this
+ * terminal to its pty. The daemon owns the process, so the tab is steerable from the
+ * cockpit / desk / `tell` and survives the terminal closing.
+ */
+export async function runWrap(args: string[], deps: WrapDeps = {}): Promise<number> {
+  const call = deps.api ?? api;
+  const log = deps.log ?? ((l: string) => console.error(l));
+  const body = wrapSessionBody(args, process.cwd());
+  const created = await call<{ id: string; harness_session_id?: string }>('/sessions', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  });
+  log(`  session ${created.id} (${body.harness}) - daemon-owned; Ctrl+] detaches, `
+    + `\`aither harness attach --pty ${created.id}\` re-attaches`);
+  const attach = deps.attach ?? (async (id: string) => (await import('./pty-attach.js')).attachPty(id));
+  return attach(created.id);
 }
 
 function flag(args: string[], name: string, fallback = ''): string {
@@ -322,6 +370,8 @@ export async function runHarnessCommand(args: string[]): Promise<number> {
           : `published to ${row.title || row.id.slice(0, 12)}; no receipt yet (the room may be busy)`);
         return p && p.channel === 'none' ? 1 : 0;
       }
+      case 'wrap':
+        return await runWrap(args.slice(1));
       case 'kill': {
         if (!args[1]) {
           console.error('usage: aither harness kill <id>');

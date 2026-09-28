@@ -726,6 +726,27 @@ export class GenesisClient {
     }
   }
 
+  /** A request with an explicit method and timeout that PRESERVES the error shape
+   *  ({error, status}; status 0 = never reached a server). For control-plane calls
+   *  (`aither ops`) whose server side may take longer than getDetailed's 5 s. */
+  async requestDetailed(method: 'GET' | 'POST', path: string, body?: Record<string, any>,
+                        timeoutMs = 60000): Promise<any> {
+    try {
+      const headers: Record<string, string> = { 'X-Caller-Type': 'PLATFORM', ...this.authHeaders() };
+      if (method === 'POST') headers['Content-Type'] = 'application/json';
+      const r = await fetch(`${this.baseUrl}${path}`, {
+        method,
+        headers,
+        body: method === 'POST' ? JSON.stringify(body ?? {}) : undefined,
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+      if (!r.ok) return this.parseErrorResponse(r);
+      return r.json();
+    } catch (err: any) {
+      return { error: err?.message || 'Request failed', status: 0 };
+    }
+  }
+
   async get(path: string): Promise<any> {
     const result = await this.getDetailed(path);
     return result?.error ? null : result;

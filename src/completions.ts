@@ -441,9 +441,7 @@ export const SUBCOMMAND_DEFS: Record<string, [string, string][]> = {
   ],
   '/acc': [
     ['stats', ''],
-    ['friction', ''],
-    ['unstable', ''],
-    ['node', '<id>'],
+    ['node', '<symbol>'],
   ],
   '/sttp': [
     ['list', ''],

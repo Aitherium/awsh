@@ -25,7 +25,8 @@ import { setActiveConfig, deepseekProvider, kimiProvider, roleProvider, getActiv
 import { RelayClient, resolveRelayUrl, type RelayMessage, type RelayUser } from './relay.js';
 import { createStreamRenderer, SteeringBar, type SessionProfile } from './renderer.js';
 import { stripFenceDelimiters } from './tui/chat-formatter.js';
-import { getCommand, getCommandNames, invokeMcpTool } from './commands.js';
+import { getCommand, getCommandNames } from './commands.js';
+import { resolveFallback, runFallback, formatFallbackOutput } from './command-fallback.js';
 import { getCommandRegistry } from './command-registry.js';
 import { runWithDetachedStdin } from './stdin-detach.js';
 import { loadAgentNames, resolveAgentMention, completer, refreshCommandCompletions, SUBCOMMANDS, SUBCOMMAND_DEFS } from './completions.js';
@@ -34,8 +35,10 @@ import {
   setJobNotifier, listJobs, getJob, cancelJob, runningCount,
   launchChatJob, launchForgeJob, launchSwarmJob,
   formatJobLine, formatJobOutput,
+  adoptStreamJob, takeStreamJob, latestStreamJobId,
   type Job,
 } from './jobs.js';
+import { StreamPump, bindSuspendKey } from './stream-pump.js';
 import { configureRemoteSync, recordTurn, loadSession, buildContextSummary } from './session-store.js';
 import { personaSpeaking, personaIdle } from './awdesk-bridge.js';
 import { setCurrentCommand, withCrashReporting } from './crash-reporter.js';
@@ -909,6 +912,11 @@ export async function startRepl(client: GenesisClient, config: ShellConfig): Pro
         await handleJobsCommand(cmdArgs);
         return;
       }
+      // ── /fg [id] — resume a chat suspended with Ctrl+Z ──
+      if (cmdName === 'fg') {
+        await handleForeground(cmdArgs);
+        return;
+      }
 
       // ── /deepseek — switch to direct DeepSeek inference on the fly ──
       //   /deepseek            → deepseek-chat (flash)
@@ -1121,38 +1129,19 @@ export async function startRepl(client: GenesisClient, config: ShellConfig): Pro
           restoreReadline();
         }
       } else {
-        // Try MCP tool fallback — auto-discovered tools are callable as slash commands
-        const mcpTool = registry.getMcpTool(cmdName);
-        if (mcpTool) {
-          try {
-            // Parse args as JSON params or key=value pairs
-            let params: Record<string, any> = {};
-            const trimmed = cmdArgs.trim();
-            if (trimmed.startsWith('{')) {
-              try { params = JSON.parse(trimmed); } catch { /* not JSON */ }
-            } else if (trimmed) {
-              for (const pair of trimmed.split(/\s+/)) {
-                const eq = pair.indexOf('=');
-                if (eq > 0) {
-                  params[pair.slice(0, eq)] = pair.slice(eq + 1);
-                } else {
-                  params['input'] = pair;
-                }
-              }
-            }
-            const spinner = (await import('ora')).default(`Calling ${cmdName}...`).start();
-            // Routes to the remote MCP gateway (config.mcpUrl) when set, else
-            // the chat backend's REST /tools/call.
-            const output = await invokeMcpTool(client, cmdName, params);
-            spinner.stop();
-            console.log(chalk.cyan(`  [MCP: ${cmdName}]`));
-            if (output && typeof output === 'object' && 'error' in output) {
-              console.log(chalk.red(`  MCP tool error: ${(output as any).error}`));
-            } else {
-              console.log(typeof output === 'string' ? output : JSON.stringify(output, null, 2));
-            }
-          } catch (err: any) {
-            console.log(chalk.red(`  MCP tool error: ${err.message}`));
+        // Catalog fallback — discovered MCP tools and Genesis @shell_command
+        // routes (genesis_endpoint) are callable as slash commands. Shared with
+        // the TUI via command-fallback.ts.
+        const fallback = resolveFallback(registry, cmdName);
+        if (fallback) {
+          const spinner = (await import('ora')).default(`Calling ${cmdName}...`).start();
+          const res = await runFallback(client, fallback, cmdArgs, config);
+          spinner.stop();
+          console.log(chalk.cyan(`  [${res.label}]`));
+          if (!res.ok) {
+            console.log(chalk.red(`  /${cmdName} failed: ${res.error}`));
+          } else {
+            console.log(formatFallbackOutput(res.output));
           }
         } else {
           const names = getCommandNames();
@@ -1336,6 +1325,7 @@ export async function startRepl(client: GenesisClient, config: ShellConfig): Pro
       pendingGate = null;  // consume — don't re-send on next message
     }
 
+    let suspended = false;
     try {
       // Only repl-tui.ts drove the Persona desktop overlay before this — the
       // plain `awsh` REPL had no wiring at all, so talking to Aither here
@@ -1365,8 +1355,10 @@ export async function startRepl(client: GenesisClient, config: ShellConfig): Pro
 
       let streamTimedOut = false;
 
-      for await (const event of stream) {
-        renderer.onEvent(event);
+      // One consumer owns the stream (StreamPump) so Ctrl+Z can detach the
+      // renderer while the SSE connection keeps running as a background job.
+      const pump = new StreamPump(stream, (event) => {
+        renderer.onEvent(event as any);
 
         if (event.type === 'stream_timeout') {
           streamTimedOut = true;
@@ -1381,6 +1373,20 @@ export async function startRepl(client: GenesisClient, config: ShellConfig): Pro
             questions: event.data.questions || [],
           };
         }
+      });
+      const unbindSuspend = bindSuspendKey(rl as any, process.stdin as any, process.platform, () => pump.detach());
+      let outcome: 'done' | 'detached';
+      try {
+        outcome = await pump.waitForeground();
+      } finally {
+        unbindSuspend();
+      }
+      if (outcome === 'detached') {
+        suspended = true;
+        const label = `Chat: ${message.slice(0, 50)}${message.length > 50 ? '...' : ''}`;
+        const job = adoptStreamJob(pump, label, activeAbort, message);
+        process.stdout.write(chalk.dim(`\n  [${job.id}] suspended -- still running in background. /fg ${job.id} to resume, /jobs ${job.id} for output.\n`));
+        return;
       }
 
       // Stream ended with timeout — check if forge agent is still running
@@ -1465,26 +1471,82 @@ export async function startRepl(client: GenesisClient, config: ShellConfig): Pro
       steeringBar.deactivate();
       if (process.stdin.isTTY) refreshPrompt();  // restore the green prompt
       renderer.finish();
-      // Capture session profile for RLM and Strata
-      lastSessionProfile = renderer.getSessionProfile();
-      // Post to Strata (best-effort, non-blocking)
-      postToStrata(client, lastSessionProfile).catch(() => {});
-      // Persist the full turn (user + assistant) locally + remote → /export, --continue.
-      try {
-        const _toks = lastSessionProfile.events.reduce((n, e) =>
-          n + ((e.type === 'llm_done' || e.type === 'llm_end') ? Number(e.data?.tokens_used || e.data?.tokens || 0) : 0), 0);
-        recordTurn(config.sessionId, lastSessionProfile.agent || 'aither', lastSessionProfile.prompt, renderer.getContent(), {
-          model: lastSessionProfile.model, tools: lastSessionProfile.tool_calls.map(t => t.name), tokens: _toks,
-        });
-      } catch { /* */ }
-      // The same two strings recordTurn() already persists, kept in memory so
-      // the NEXT turn can refer to this one. Without it the model is handed
-      // telemetry about the last turn and none of its content.
-      try {
-        const _a = renderer.getContent();
-        if (message) _turnHistory.push({ user: message, assistant: _a || '' });
-        while (_turnHistory.length > HISTORY_TURNS) _turnHistory.shift();
-      } catch { /* */ }
+      // Ctrl+Z: the turn is still running as a job -- not a finished turn, so
+      // nothing is recorded yet and the stream is NOT aborted.
+      if (!suspended) {
+        // Capture session profile for RLM and Strata
+        lastSessionProfile = renderer.getSessionProfile();
+        // Post to Strata (best-effort, non-blocking)
+        postToStrata(client, lastSessionProfile).catch(() => {});
+        // Persist the full turn (user + assistant) locally + remote → /export, --continue.
+        try {
+          const _toks = lastSessionProfile.events.reduce((n, e) =>
+            n + ((e.type === 'llm_done' || e.type === 'llm_end') ? Number(e.data?.tokens_used || e.data?.tokens || 0) : 0), 0);
+          recordTurn(config.sessionId, lastSessionProfile.agent || 'aither', lastSessionProfile.prompt, renderer.getContent(), {
+            model: lastSessionProfile.model, tools: lastSessionProfile.tool_calls.map(t => t.name), tokens: _toks,
+          });
+        } catch { /* */ }
+        // The same two strings recordTurn() already persists, kept in memory so
+        // the NEXT turn can refer to this one. Without it the model is handed
+        // telemetry about the last turn and none of its content.
+        try {
+          const _a = renderer.getContent();
+          if (message) _turnHistory.push({ user: message, assistant: _a || '' });
+          while (_turnHistory.length > HISTORY_TURNS) _turnHistory.shift();
+        } catch { /* */ }
+      }
+      activeAbort = null;
+      if (!closed) restoreReadline();
+    }
+  }
+
+  /* ── /fg — bring a Ctrl+Z'd chat back to the foreground ────────── */
+
+  async function handleForeground(args: string): Promise<void> {
+    const raw = (args || '').trim().replace(/^[#%]/, '');
+    const id = raw ? Number(raw) : latestStreamJobId();
+    if (id === null || !Number.isInteger(id)) {
+      console.log(chalk.yellow(raw ? '  Usage: /fg [job-id]' : '  No suspended chat. Ctrl+Z during a reply suspends it.'));
+      return;
+    }
+    const taken = takeStreamJob(id);
+    if (typeof taken === 'string') { console.log(chalk.yellow(`  ${taken}`)); return; }
+    const { pump, label, prompt } = taken;
+    activeAbort = taken.abortController || new AbortController();
+    const renderer = createStreamRenderer(config.sessionId, label);
+    renderer.begin();
+    let suspendedAgain = false;
+    try {
+      // Replays what it missed. Same gate tracking as the original sink, so an
+      // ask-back that arrives after /fg still auto-resolves on the next message.
+      pump.attach((event: any) => {
+        renderer.onEvent(event);
+        if (event?.type === 'clarification_needed' && event.data?.plan_id) {
+          pendingGate = {
+            planId: event.data.plan_id,
+            gateId: event.data.gate_id || '',
+            questions: event.data.questions || [],
+          };
+        }
+      });
+      const unbind = bindSuspendKey(rl as any, process.stdin as any, process.platform, () => pump.detach());
+      let outcome: 'done' | 'detached';
+      try { outcome = await pump.waitForeground(); } finally { unbind(); }
+      if (outcome === 'detached') {
+        suspendedAgain = true;
+        const job = adoptStreamJob(pump, label, activeAbort, prompt);
+        process.stdout.write(chalk.dim(`\n  [${job.id}] suspended again. /fg ${job.id} to resume.\n`));
+      }
+    } catch (err: any) {
+      if (err?.name === 'AbortError') process.stdout.write(chalk.dim('\n  (interrupted)\n'));
+      else console.log(chalk.red(`  Error: ${err?.message || err}`));
+    } finally {
+      renderer.finish();
+      if (!suspendedAgain) {
+        try {
+          recordTurn(config.sessionId, 'aither', prompt, renderer.getContent(), {});
+        } catch { /* */ }
+      }
       activeAbort = null;
       if (!closed) restoreReadline();
     }
@@ -1574,6 +1636,7 @@ export async function startRepl(client: GenesisClient, config: ShellConfig): Pro
     console.log(`    ${chalk.cyan('/jobs')}              List local background jobs`);
     console.log(`    ${chalk.cyan('/jobs <id>')}         View job output`);
     console.log(`    ${chalk.cyan('/jobs cancel <id>')}  Cancel a running job`);
+    console.log(`    ${chalk.cyan('/fg [id]')}           Resume a chat suspended with Ctrl+Z`);
     console.log();
     console.log(chalk.dim('  Cloud expeditions (durable):'));
     console.log(`    ${chalk.cyan('/jobs cloud')}         List expeditions`);
@@ -1901,6 +1964,7 @@ function printHelp(config: ShellConfig): void {
   console.log(`  ${chalk.cyan('/jobs')}            List all background jobs`);
   console.log(`  ${chalk.cyan('/jobs <id>')}       View job output`);
   console.log(`  ${chalk.cyan('/jobs cancel <id>')} Cancel a running job`);
+  console.log(`  ${chalk.cyan('/fg [id]')}         Resume a chat suspended with Ctrl+Z`);
   console.log();
 }
 
@@ -1951,7 +2015,7 @@ function buildCommandChoices() {
   const categories: [string, string[]][] = [
     ['System',     ['status', 'services', 'agents', 'logs', 'model', 'metrics']],
     ['Agents',     ['forge', 'sessions', 'resume', 'swarm', 'inbox', 'compose', 'monitor', 'notebook']],
-    ['Jobs',       ['jobs']],
+    ['Jobs',       ['jobs', 'fg']],
     ['Search',     ['search', 'codegraph', 'scope', 'onboard', 'obsidian', 'tools', 'context']],
     ['AI',         ['think', 'research', 'memory', 'soul']],
     ['Ops',        ['deploy', 'fleet', 'workflow', 'backup', 'benchmark', 'products', 'docker']],
@@ -1972,7 +2036,7 @@ function buildCommandChoices() {
   const used = new Set<string>();
 
   // Merge static + dynamically discovered command names
-  const allCommands = [...new Set([...commands, ...dynamicCmds.map((c: { name: string }) => c.name), 'jobs',
+  const allCommands = [...new Set([...commands, ...dynamicCmds.map((c: { name: string }) => c.name), 'jobs', 'fg',
     ...(packDeclaresApp() ? ['gui'] : []),
     ...(packHasSecret() ? ['password'] : []),
     ...packCommandNames()])];
@@ -2019,6 +2083,15 @@ function buildCommandChoices() {
           name: '/jobs',
           value: 'jobs',
           description: 'List and manage background jobs',
+        });
+        used.add(name);
+        continue;
+      }
+      if (name === 'fg') {
+        choices.push({
+          name: '/fg',
+          value: 'fg',
+          description: 'Resume a chat suspended with Ctrl+Z',
         });
         used.add(name);
         continue;

@@ -96,3 +96,29 @@ describe('Windows Terminal installer', () => {
     assert.equal(parsed.u, 'https://example.com/x');
   });
 });
+
+describe('daemon-owned tab profile (opt-in)', () => {
+  test('adds ONE profile running `awsh harness wrap claude`, leaves the default alone, and is idempotent', async () => {
+    const { installDaemonTabProfile, DAEMON_TAB_PROFILE_GUID } = await import('../src/terminal-install.js');
+    const lad = fakeLocalAppData(GOOD);
+    const r = installDaemonTabProfile(lad);
+    assert.equal(r.ok, true, r.message);
+    const after: any = parseJsonc(readFileSync(r.path as string, 'utf-8'));
+    assert.equal(after.profiles.list.length, 3);
+    const added = after.profiles.list.find((p: any) => p.guid === DAEMON_TAB_PROFILE_GUID);
+    assert.match(added.commandline, /harness wrap claude/);
+    assert.equal(after.defaultProfile, '{abc}', 'never becomes the default profile');
+    assert.equal(after.profiles.list.find((p: any) => p.guid === '{abc}').commandline,
+      'pwsh -NoExit -Command [Console]::Write(1)');
+    const again = installDaemonTabProfile(lad);
+    assert.equal(again.message, 'already installed');
+    const twice: any = parseJsonc(readFileSync(r.path as string, 'utf-8'));
+    assert.equal(twice.profiles.list.length, 3);
+  });
+
+  test('refuses a settings.json with no profiles.list rather than guessing', async () => {
+    const { installDaemonTabProfile } = await import('../src/terminal-install.js');
+    const lad = fakeLocalAppData(JSON.stringify({ defaultProfile: '{abc}', profiles: {} }));
+    assert.equal(installDaemonTabProfile(lad).ok, false);
+  });
+});

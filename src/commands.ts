@@ -2,7 +2,7 @@
  * Built-in slash commands for AitherShell CLI.
  */
 
-import { execSync, spawn } from 'node:child_process';
+import { execSync, spawn, spawnSync } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync, writeFileSync, mkdirSync, statSync } from 'node:fs';
 import { resolve, join, dirname, basename, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -14,6 +14,7 @@ import type { GenesisClient } from './client.js';
 import type { ShellConfig } from './config.js';
 import { getActiveConfig, DEFAULT_AGENT } from './config.js';
 import { getRemoteMcpClient } from './mcp-client.js';
+import { getCommandRegistry } from './command-registry.js';
 import { isAdultContentVisible, invalidateAdultGate, ADULT_TIERS } from './adult-gate.js';
 import { formatTable, getSessionArtifacts, clearSessionArtifacts, resolveImagePath, osc8Link, addSessionArtifact, type SessionArtifact } from './renderer.js';
 import {
@@ -37,7 +38,6 @@ import {
   requestDeviceCode,
   pollDeviceToken,
 } from './auth.js';
-import { runWizard } from './install-wizard.js';
 import {
   personaHealthy,
   getAwdeskStatus,
@@ -48,6 +48,8 @@ import {
   setAwdeskAgent,
   listAwdeskAgentAvatars,
   exportAwdeskToShell,
+  deskCommand,
+  deskCommandHistory,
 } from './awdesk-bridge.js';
 import {
   addProject, listProjects, switchProject, removeProject, getActiveWorkspace, pickDirectory,
@@ -415,9 +417,11 @@ const COMMANDS: Record<string, Command> = {
         if (!st) return chalk.yellow('  adk is not on PATH -- pip install awdk');
         if (st.linked) {
           const who = st.username || 'your account';
+          // A tenant user is homed on their own portal.
+          const where = st.tenant_name ? ` on ${st.tenant_name} (${st.portal})` : '';
           return st.role === 'owner'
-            ? chalk.green(`  linked as ${who} -- platform owner (full endpoint and vault map)`)
-            : chalk.green(`  linked as ${who}`);
+            ? chalk.green(`  linked as ${who} -- platform owner (full endpoint and vault map)${where}`)
+            : chalk.green(`  linked as ${who}${where}`);
         }
         return st.signed_in
           ? chalk.yellow('  signed in locally, not linked to aitherium.com -- run /link')
@@ -566,14 +570,6 @@ const COMMANDS: Record<string, Command> = {
       console.log(chalk.dim('  Route:  @agent_name message — talk to a specific agent'));
       console.log(chalk.dim('  Exit:   type "exit" or press Ctrl+D'));
       console.log();
-    },
-  },
-
-  // ── Installation & onboarding ──
-  install: {
-    description: 'One-click installer wizard (non-technical setup)',
-    handler: async (client, _args, config) => {
-      await runWizard(client, config);
     },
   },
 
@@ -1325,78 +1321,6 @@ const COMMANDS: Record<string, Command> = {
     },
   },
 
-  sessions: {
-    description: 'List recent forge sessions',
-    usage: '/sessions [--limit N]',
-    handler: async (client) => {
-      const spinner = ora('Fetching sessions...').start();
-      const result = await client.get('/forge/sessions');
-      spinner.stop();
-
-      const sessions = result?.sessions || [];
-      if (!sessions.length) {
-        console.log(chalk.dim('  No sessions found'));
-        return;
-      }
-
-      console.log();
-      const rows = sessions.slice(0, 20).map((s: any) => [
-        chalk.cyan(s.session_id?.slice(0, 12) || s.id?.slice(0, 12) || '?'),
-        s.agent_type || s.agent || '',
-        s.status || '',
-        String(s.turn_count || 0),
-        s.completed_at
-          ? new Date(s.completed_at * 1000).toLocaleString()
-          : chalk.dim('active'),
-      ]);
-      console.log(formatTable(['  Session', 'Agent', 'Status', 'Turns', 'Completed'], rows));
-      console.log();
-    },
-  },
-
-  resume: {
-    description: 'Resume a previous forge session',
-    usage: '/resume <session_id> [prompt]',
-    handler: async (client: GenesisClient, args: string) => {
-      const parts = args.trim().split(/\s+/);
-      const sessionId = parts[0];
-      const prompt = parts.slice(1).join(' ') || 'Continue from where you left off.';
-
-      if (!sessionId) {
-        console.log(chalk.yellow('  Usage: /resume <session_id> [continuation prompt]'));
-        return;
-      }
-
-      const spinner = ora(`Resuming session ${sessionId}...`).start();
-      try {
-        const res = await fetch(`${client.baseUrl}/forge/resume`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ session_id: sessionId, prompt }),
-        });
-        const result = await res.json();
-        spinner.stop();
-
-        if (result?.error) {
-          console.log(chalk.red(`  Error: ${result.error}`));
-          return;
-        }
-
-        const output = result?.response || result?.result || result?.output;
-        if (output) {
-          console.log();
-          console.log(output);
-          console.log();
-        } else {
-          console.log(JSON.stringify(result, null, 2));
-        }
-      } catch (err: any) {
-        spinner.stop();
-        console.log(chalk.red(`  Error: ${err.message}`));
-      }
-    },
-  },
-
   apps: {
     description: 'Manage AitherOS apps (status, install, start, stop)',
     usage: '/apps [install|start|stop] [desktop|node|veil|connect|shell]',
@@ -1804,134 +1728,6 @@ const COMMANDS: Record<string, Command> = {
       console.log();
       console.log(chalk.dim('  Info:'));
       console.log(`  ${chalk.cyan('/gaming status')}         Show GPU + Docker status`);
-      console.log();
-    },
-  },
-
-  // ── Lockbox ───────────────────────────────────────────────────────────
-
-  lockbox: {
-    description: 'Manage private content lockbox',
-    usage: '/lockbox [status|activate|lock|prompts|models]',
-    handler: async (client: GenesisClient, args: string) => {
-      const sub = args.trim().toLowerCase().split(/\s+/)[0] || 'status';
-
-      if (sub === 'status' || sub === '') {
-        const spinner = ora('Checking lockbox...').start();
-        const result = await client.get('/safety/config/lockbox') as any;
-        spinner.stop();
-
-        if (result?.success) {
-          const icon = result.active ? '🔓' : '🔒';
-          console.log();
-          console.log(chalk.bold(`  ${icon} Lockbox: ${result.active ? 'Active' : 'Inactive'}`));
-          console.log(chalk.dim(`  Safety level: ${result.safety_level || 'unknown'}`));
-          console.log(chalk.dim(`  Eligible: ${result.lockbox_eligible ? 'yes' : 'no'}`));
-          if (result.prompt_count > 0) {
-            console.log(chalk.green(`  Prompts: ${result.prompt_count}`));
-            if (result.categories?.length) {
-              console.log(chalk.dim(`  Categories: ${result.categories.join(', ')}`));
-            }
-          }
-          console.log();
-          if (!result.active && result.lockbox_eligible) {
-            console.log(chalk.dim('  Activate: /lockbox activate'));
-          } else if (!result.lockbox_eligible) {
-            // Naming the tier that would unlock this is itself the disclosure —
-            // only spell it out for accounts that have already opted in.
-            const adultVisible = await isAdultContentVisible(client);
-            console.log(chalk.dim(adultVisible
-              ? '  Set unrestricted first: /safety set unrestricted'
-              : '  Not available at your current content policy.'));
-          }
-          console.log();
-        } else {
-          console.log(chalk.red('  Could not fetch lockbox status'));
-        }
-        return;
-      }
-
-      if (sub === 'activate' || sub === 'unlock' || sub === 'open') {
-        const spinner = ora('Activating lockbox...').start();
-        const result = await client.post('/safety/config/lockbox/activate') as any;
-        spinner.stop();
-
-        if (result?.success) {
-          console.log(chalk.green(`\n  🔓 ${result.message}\n`));
-        } else {
-          console.log(chalk.red(`\n  ❌ ${result?.detail || 'Activation failed'}\n`));
-        }
-        return;
-      }
-
-      if (sub === 'lock' || sub === 'close') {
-        const spinner = ora('Locking lockbox...').start();
-        const result = await client.put('/safety/config/user', { level: 'professional' }) as any;
-        spinner.stop();
-
-        if (result?.success !== false) {
-          console.log(chalk.yellow('\n  🔒 Lockbox locked — safety set to professional\n'));
-        } else {
-          console.log(chalk.red(`\n  Failed: ${result?.detail || 'unknown error'}\n`));
-        }
-        return;
-      }
-
-      if (sub === 'prompts') {
-        const spinner = ora('Loading prompts...').start();
-        const result = await client.get('/safety/config/lockbox/prompts') as any;
-        spinner.stop();
-
-        if (result?.success) {
-          console.log();
-          console.log(chalk.bold(`  Lockbox Prompts (${result.prompt_count})`));
-          console.log(chalk.dim(`  Safety level: ${result.safety_level}`));
-          console.log();
-          for (const p of (result.prompts || [])) {
-            const icon = p.has_content ? '✅' : '🔒';
-            const cat = p.category ? chalk.dim(` [${p.category}]`) : '';
-            console.log(`  ${icon} ${p.id || p.name || 'unnamed'}${cat}`);
-          }
-          console.log();
-        } else {
-          console.log(chalk.red('  Could not load prompts'));
-        }
-        return;
-      }
-
-      if (sub === 'models') {
-        const spinner = ora('Loading private models...').start();
-        const result = await client.get('/safety/config/lockbox/models') as any;
-        spinner.stop();
-
-        if (result?.success) {
-          const models = result.models || [];
-          const loras = result.loras || [];
-          console.log();
-          console.log(chalk.bold(`  Private Models (${result.safety_level})`));
-          console.log(chalk.dim(`  Checkpoints: ${models.length} | LoRAs: ${loras.length}`));
-          console.log();
-          for (const m of models) {
-            const name = typeof m === 'string' ? m : (m.name || m.id || 'unnamed');
-            console.log(chalk.green(`  🎨 ${name}`));
-          }
-          for (const l of loras) {
-            const name = typeof l === 'string' ? l : (l.name || l.id || 'unnamed');
-            console.log(chalk.magenta(`  ✨ ${name}`));
-          }
-          console.log();
-        } else {
-          console.log(chalk.red('  Could not load private models'));
-        }
-        return;
-      }
-
-      console.log(chalk.bold('\n  /lockbox — Private content lockbox\n'));
-      console.log(`  ${chalk.cyan('/lockbox')}              Show lockbox status`);
-      console.log(`  ${chalk.cyan('/lockbox activate')}     Activate & seed private prompts`);
-      console.log(`  ${chalk.cyan('/lockbox lock')}         Lock (revert to professional)`);
-      console.log(`  ${chalk.cyan('/lockbox prompts')}      List available private prompts`);
-      console.log(`  ${chalk.cyan('/lockbox models')}       List private models & LoRAs`);
       console.log();
     },
   },
@@ -2598,14 +2394,16 @@ const COMMANDS: Record<string, Command> = {
 
   soul: {
     description: 'Load or list personality souls',
-    usage: '/soul [list|load <name>|active]',
+    usage: '/soul [list|load <path>|active [agent]]',
     handler: async (client: GenesisClient, args: string) => {
-      const parts = args.trim().toLowerCase().split(/\s+/);
+      const raw = args.trim().split(/\s+/);
+      const parts = raw.map((p) => p.toLowerCase());
       const sub = parts[0] || 'active';
 
       if (sub === 'list') {
+        // Genesis serves GET /soul/available (routers/soul.py); there is no GET /soul.
         const spinner = ora('Fetching souls...').start();
-        const result = await client.get('/soul');
+        const result = await client.get('/soul/available');
         spinner.stop();
         const souls = result?.souls || result?.available || [];
         if (!souls.length) { console.log(chalk.dim('  No souls available.')); return; }
@@ -2616,15 +2414,20 @@ const COMMANDS: Record<string, Command> = {
           console.log(`  ${chalk.cyan(name)}${active}`);
         }
         console.log();
-      } else if (sub === 'load' && parts[1]) {
-        const spinner = ora(`Loading soul "${parts[1]}"...`).start();
-        const result = await client.post('/soul/load', { name: parts[1] });
+      } else if (sub === 'load' && raw[1]) {
+        // LoadSoulRequest requires `path` (a soul file); a `{name}` body was a 422.
+        const path = raw.slice(1).join(' ');
+        const spinner = ora(`Loading soul "${path}"...`).start();
+        const result = await client.post('/soul/load', { path });
         spinner.stop();
-        console.log(result?.loaded ? chalk.green(`  Soul "${parts[1]}" loaded.`) : chalk.yellow('  ' + (result?.error || 'Could not load.')));
+        console.log(result?.loaded ? chalk.green(`  Soul "${path}" loaded.`) : chalk.yellow('  ' + (result?.error || result?.detail || 'Could not load.')));
       } else {
-        const result = await client.get('/soul/active');
-        const active = result?.soul || result?.active || result?.name || 'none';
-        console.log(chalk.bold('  Active soul: ') + chalk.cyan(typeof active === 'string' ? active : active.name || 'none'));
+        // GET /soul/{agent_id}; `/soul/active` asked about an agent literally named "active".
+        const agent = (sub === 'active' ? raw[1] : raw[0]) || 'aither';
+        const result = await client.get(`/soul/${encodeURIComponent(agent)}`) as any;
+        const src = result?.overlay?.source_path || result?.overlay?.name;
+        const label = result?.has_soul ? (src || 'loaded') : 'none';
+        console.log(chalk.bold(`  Active soul (${agent}): `) + chalk.cyan(String(label)));
       }
     },
   },
@@ -2700,42 +2503,6 @@ const COMMANDS: Record<string, Command> = {
       const output = result?.result || result?.plan || result?.response;
       if (output) { console.log(); console.log(typeof output === 'string' ? output : JSON.stringify(output, null, 2)); console.log(); }
       else { console.log(JSON.stringify(result, null, 2)); }
-    },
-  },
-
-  fleet: {
-    description: 'Manage GPU fleet',
-    usage: '/fleet [status|launch|drain <id>]',
-    handler: async (client: GenesisClient, args: string) => {
-      const parts = args.trim().split(/\s+/);
-      const sub = (parts[0] || 'status').toLowerCase();
-
-      if (sub === 'status') {
-        const spinner = ora('Fetching fleet status...').start();
-        const result = await client.get('/fleet/pool/status');
-        spinner.stop();
-        if (!result) { console.log(chalk.dim('  Fleet service not available.')); return; }
-        console.log();
-        console.log(chalk.bold('  GPU Fleet'));
-        const pool = result.pool || result;
-        if (pool.total_workers != null) console.log(`  Workers: ${pool.active_workers || 0}/${pool.total_workers} active`);
-        if (pool.pending_tasks != null) console.log(`  Pending: ${pool.pending_tasks} tasks`);
-        if (pool.gpu_memory_gb != null) console.log(`  VRAM:    ${pool.gpu_memory_gb} GB`);
-        console.log();
-      } else if (sub === 'launch') {
-        const task = parts.slice(1).join(' ') || 'default';
-        const spinner = ora('Launching fleet session...').start();
-        const result = await client.post('/fleet/launch', { task, mode: 'auto' });
-        spinner.stop();
-        console.log(result?.session_id ? chalk.green(`  Launched: ${result.session_id}`) : chalk.yellow('  ' + (result?.error || 'Launch failed.')));
-      } else if (sub === 'drain' && parts[1]) {
-        const spinner = ora(`Draining ${parts[1]}...`).start();
-        const result = await client.post('/fleet/drain', { session_id: parts[1] });
-        spinner.stop();
-        console.log(result?.drained ? chalk.green('  Drained.') : chalk.yellow('  ' + (result?.error || 'Drain failed.')));
-      } else {
-        console.log(chalk.dim('  Usage: /fleet [status|launch|drain <id>]'));
-      }
     },
   },
 
@@ -2848,23 +2615,35 @@ const COMMANDS: Record<string, Command> = {
     description: 'Run or view model benchmarks',
     usage: '/benchmark [run|history]',
     handler: async (client: GenesisClient, args: string) => {
-      const sub = (args.trim() || 'history').toLowerCase();
+      // Genesis serves standard benchmarks under /training/pipeline
+      // (routers/training_pipeline.py): POST .../benchmark/standard runs one
+      // and returns the report; GET .../benchmark/standard/reports lists them.
+      // The old /benchmark/standard/{run,history} paths never existed.
+      const parts = args.trim().split(/\s+/).filter(Boolean);
+      const sub = (parts[0] || 'history').toLowerCase();
       if (sub === 'run') {
-        const spinner = ora('Starting benchmark...').start();
-        const result = await client.post('/benchmark/standard/run', {});
+        const body: Record<string, any> = {};
+        if (parts[1]) body.preset = parts[1];
+        const spinner = ora('Running standard benchmark (this can take minutes)...').start();
+        const result = await client.post('/training/pipeline/benchmark/standard', body);
         spinner.stop();
-        console.log(result?.benchmark_id ? chalk.green(`  Benchmark started: ${result.benchmark_id}`) : chalk.yellow('  ' + (result?.error || 'Could not start.')));
+        if (!result || result.error) {
+          console.log(chalk.yellow('  ' + (result?.error || 'Could not run benchmark.')));
+          return;
+        }
+        const score = result.overall_score != null ? chalk.cyan(String(result.overall_score)) : '?';
+        console.log(chalk.green(`  Benchmark ${result.version_id || ''} ${result.model_name || ''}`.trimEnd()) + `  score ${score}`);
       } else {
-        const spinner = ora('Fetching benchmark history...').start();
-        const result = await client.get('/benchmark/standard/history');
+        const spinner = ora('Fetching benchmark reports...').start();
+        const result = await client.get('/training/pipeline/benchmark/standard/reports');
         spinner.stop();
-        const runs = result?.benchmarks || result?.history || [];
+        const runs = result?.reports || [];
         if (!runs.length) { console.log(chalk.dim('  No benchmark history.')); return; }
         console.log();
         for (const r of runs.slice(0, 10)) {
-          const date = r.timestamp ? new Date(r.timestamp).toLocaleString() : '';
-          const model = r.model || '?';
-          const score = r.score != null ? chalk.cyan(`${r.score}`) : '';
+          const date = r.run_at ? new Date(r.run_at).toLocaleString() : '';
+          const model = r.model_name || '?';
+          const score = r.overall_score != null ? chalk.cyan(`${r.overall_score}`) : '';
           console.log(`  ${chalk.dim(date)} ${model} ${score}`);
         }
         console.log();
@@ -2890,27 +2669,15 @@ const COMMANDS: Record<string, Command> = {
   },
 
   backup: {
-    description: 'Create or list backups',
-    usage: '/backup [list|now]',
+    // Replaced 2026-09-26: the old handler read /scheduler/backup/* (a legacy queue
+    // that never touched the declared backup sets) and a `backup_id` no route
+    // returns. Backups are now a platform op: `aither ops backups <verb>`.
+    description: 'Backups (platform ops): state, verify, run, restore',
+    usage: '/backup [state|verify|run|restore] [k=v] [--apply] [--agent genesis] [--watch]',
     handler: async (client: GenesisClient, args: string) => {
-      const sub = (args.trim() || 'list').toLowerCase();
-      if (sub === 'now') {
-        const spinner = ora('Creating backup...').start();
-        const result = await client.post('/backup/now', {});
-        spinner.stop();
-        console.log(result?.backup_id ? chalk.green(`  Backup created: ${result.backup_id}`) : chalk.yellow('  ' + (result?.error || 'Backup failed.')));
-      } else {
-        const spinner = ora('Fetching backups...').start();
-        const result = await client.get('/backup/schedule');
-        spinner.stop();
-        const backups = result?.backups || result?.schedules || [];
-        if (!backups.length) { console.log(chalk.dim('  No backups found.')); return; }
-        console.log();
-        for (const b of backups.slice(0, 10)) {
-          console.log(`  ${chalk.cyan(b.id || b.name || '?')} ${chalk.dim(b.timestamp || b.created || '')} ${b.status || ''}`);
-        }
-        console.log();
-      }
+      const { runOpsCommand } = await import('./ops-command.js');
+      const argv = parseQuotedArgs(args.trim());
+      await runOpsCommand(['backups', ...(argv.length ? argv : ['state'])], client);
     },
   },
 
@@ -3009,7 +2776,7 @@ const COMMANDS: Record<string, Command> = {
         console.log();
         const token = config.authToken || cfg.api_key;
         if (token) {
-          console.log(chalk.dim(`  Auth: logged in — /grid sync to push config to workspace`));
+          console.log(chalk.dim(`  Auth: logged in — /grid sync to export config to a file`));
         } else {
           console.log(chalk.dim('  Auth: not logged in — /login to enable cloud sync'));
         }
@@ -3064,7 +2831,7 @@ const COMMANDS: Record<string, Command> = {
 
         console.log(chalk.green(`  Added ${role} node: ${host}:${port}`));
         await testNode(host, port);
-        console.log(chalk.dim('  Sync to cloud: /grid sync'));
+        console.log(chalk.dim('  Export for another machine: /grid sync'));
 
       } else if (sub === 'remove') {
         const host = parts[1];
@@ -3117,90 +2884,44 @@ const COMMANDS: Record<string, Command> = {
         if (!checked) console.log(chalk.dim(target ? `  No node found: ${target}` : '  No nodes configured'));
         console.log();
 
-      } else if (sub === 'sync') {
-        const cfg = readGridConfig();
-        const token = config.authToken || cfg.api_key;
-        if (!token) {
-          console.log(chalk.yellow('  Not logged in. Run: /login'));
-          return;
-        }
-
-        const spinner = ora('Syncing grid config to workspace...').start();
-        try {
-          // Try Genesis Strata endpoint first
-          const result = await client.post('/strata/write', {
-            path: 'grid/config.json',
-            data: JSON.stringify({
-              profile: cfg.profile, backend: cfg.backend, base_url: cfg.base_url,
-              model: cfg.model, reasoning_backend: cfg.reasoning_backend,
-              reasoning_url: cfg.reasoning_url, reasoning_model: cfg.reasoning_model,
-              cluster_backend: cfg.cluster_backend, cluster_url: cfg.cluster_url,
-              cluster_model: cfg.cluster_model, grid_nodes: cfg.grid_nodes,
-            }, null, 2),
-          });
-          spinner.stop();
-          if (result?.success) {
-            console.log(chalk.green('  Grid config synced to workspace'));
-            console.log(chalk.dim('  Pull on another machine: /grid pull'));
-          } else {
-            // Fallback: try gateway directly
-            const gateway = cfg.gateway_url || 'https://gateway.aitherium.com';
-            const r = await fetch(`${gateway}/api/v1/config/grid`, {
-              method: 'PUT',
-              headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-              body: JSON.stringify(cfg.grid_nodes || {}),
-              signal: AbortSignal.timeout(10000),
-            });
-            spinner.stop();
-            if (r.ok) {
-              console.log(chalk.green('  Grid config synced via gateway'));
-            } else {
-              console.log(chalk.yellow('  Sync failed — config saved locally only'));
-            }
+      } else if (sub === 'sync' || sub === 'pull') {
+        // No served workspace store holds grid config: Genesis has no /strata/read|write
+        // (only /scheduler/strata/* admin routes) and no gateway serves
+        // /api/v1/config/grid, so both calls always failed and "sync" only ever
+        // reported "saved locally". The config IS local (~/.aither/config.json); move it
+        // between machines as a file instead of pretending a cloud round-trip happened.
+        const GRID_KEYS = [
+          'profile', 'backend', 'base_url', 'model', 'reasoning_backend', 'reasoning_url',
+          'reasoning_model', 'cluster_backend', 'cluster_url', 'cluster_model', 'grid_nodes',
+        ];
+        const file = parts[1] || join(homedir(), '.aither', 'grid-config.export.json');
+        if (sub === 'sync') {
+          const cfg = readGridConfig();
+          const out: Record<string, any> = {};
+          for (const k of GRID_KEYS) if (cfg[k] !== undefined) out[k] = cfg[k];
+          try {
+            writeFileSync(file, JSON.stringify(out, null, 2), 'utf-8');
+            console.log(chalk.green(`  Grid config exported: ${file}`));
+            console.log(chalk.dim('  On another machine: /grid pull <that file>'));
+          } catch (e: any) {
+            console.log(chalk.red(`  Export failed: ${e.message || e}`));
           }
-        } catch (e: any) {
-          spinner.stop();
-          console.log(chalk.yellow(`  Sync failed: ${e.message || e}`));
-          console.log(chalk.dim('  Config is saved locally at ~/.aither/config.json'));
-        }
-
-      } else if (sub === 'pull') {
-        const cfg = readGridConfig();
-        const token = config.authToken || cfg.api_key;
-        if (!token) {
-          console.log(chalk.yellow('  Not logged in. Run: /login'));
-          return;
-        }
-
-        const spinner = ora('Pulling grid config from workspace...').start();
-        try {
-          const result = await client.get('/strata/read?path=grid/config.json') as any;
-          spinner.stop();
-          if (result?.data) {
-            const gridData = typeof result.data === 'string' ? JSON.parse(result.data) : result.data;
-            writeGridConfig(gridData);
-            console.log(chalk.green('  Grid config pulled and saved locally'));
+        } else {
+          if (!existsSync(file)) {
+            console.log(chalk.yellow(`  No grid export at ${file}`));
+            console.log(chalk.dim('  Run /grid sync [file] on your configured machine first'));
+            return;
+          }
+          try {
+            const data = JSON.parse(readFileSync(file, 'utf-8'));
+            const picked: Record<string, any> = {};
+            for (const k of GRID_KEYS) if (data?.[k] !== undefined) picked[k] = data[k];
+            writeGridConfig(picked);
+            console.log(chalk.green(`  Grid config imported from ${file}`));
             console.log(chalk.dim('  Run: /grid status'));
-          } else {
-            // Fallback: gateway
-            const gateway = cfg.gateway_url || 'https://gateway.aitherium.com';
-            const r = await fetch(`${gateway}/api/v1/config/grid`, {
-              headers: { 'Authorization': `Bearer ${token}` },
-              signal: AbortSignal.timeout(10000),
-            });
-            spinner.stop();
-            if (r.ok) {
-              const gridData = await r.json();
-              writeGridConfig(gridData);
-              console.log(chalk.green('  Grid config pulled from gateway'));
-            } else {
-              console.log(chalk.yellow('  No grid config found in workspace'));
-              console.log(chalk.dim('  Run /grid sync from your configured machine first'));
-            }
+          } catch (e: any) {
+            console.log(chalk.red(`  Import failed: ${e.message || e}`));
           }
-        } catch (e: any) {
-          spinner.stop();
-          console.log(chalk.yellow(`  Pull failed: ${e.message || e}`));
         }
 
       } else {
@@ -3212,8 +2933,8 @@ const COMMANDS: Record<string, Command> = {
         console.log(chalk.dim('    /grid remove <ip>         Remove a node'));
         console.log(chalk.dim('    /grid test                Test all nodes'));
         console.log(chalk.dim('    /grid test <ip>           Test specific node'));
-        console.log(chalk.dim('    /grid sync                Push config to workspace'));
-        console.log(chalk.dim('    /grid pull                Pull config from workspace'));
+        console.log(chalk.dim('    /grid sync [file]         Export grid config to a file'));
+        console.log(chalk.dim('    /grid pull [file]         Import grid config from a file'));
         console.log();
       }
     },
@@ -3392,17 +3113,15 @@ const COMMANDS: Record<string, Command> = {
   deploy: {
     description: 'Deploy a service',
     usage: '/deploy <service_name>',
-    handler: async (client: GenesisClient, args: string) => {
+    // RETIRED: Genesis serves no POST /deploy, so every call was a 404 printed as
+    // "Deploy service not available." Per-service deploys are a rebuild of the
+    // service image; the served operator surface is the ring deploy (MCP
+    // `ring_deploy`, Genesis /rings/{ring}/deploy), which is platform-operator gated.
+    handler: async (_client: GenesisClient, args: string) => {
       const svc = args.trim();
-      if (!svc) { console.log(chalk.dim('  Usage: /deploy <service_name>')); return; }
-      const spinner = ora(`Deploying ${svc}...`).start();
-      const result = await client.post('/deploy', { service: svc });
-      spinner.stop();
-      if (result?.status === 'deployed' || result?.success) {
-        console.log(chalk.green(`  ${svc} deployed.`));
-      } else {
-        console.log(chalk.yellow('  ' + (result?.error || result?.message || 'Deploy service not available.')));
-      }
+      console.log(chalk.yellow(`  /deploy${svc ? ` ${svc}` : ''} is not a served operation.`));
+      console.log(chalk.dim('  Deploy a ring through the ring_deploy MCP tool (platform operators),'));
+      console.log(chalk.dim('  or rebuild the service image from the repo.'));
     },
   },
 
@@ -3412,13 +3131,15 @@ const COMMANDS: Record<string, Command> = {
     handler: async (client: GenesisClient, args: string) => {
       const sub = (args.trim() || 'status').toLowerCase();
       if (sub === 'scan') {
+        // Chaos lives on the jail router (prefix /jail): GET /jail/chaos/health
+        // and GET /jail/chaos/statistics. A POST to /chaos/health was a 404/405.
         const spinner = ora('Running security scan...').start();
-        const result = await client.post('/chaos/health', {});
+        const result = await client.get('/jail/chaos/health');
         spinner.stop();
         console.log(result ? chalk.green('  Scan complete.') : chalk.yellow('  Security service not available.'));
         if (result) console.log(JSON.stringify(result, null, 2));
       } else {
-        const result = await client.get('/chaos/statistics');
+        const result = await client.get('/jail/chaos/statistics');
         if (!result) { console.log(chalk.dim('  Security service not available.')); return; }
         console.log();
         console.log(JSON.stringify(result, null, 2));
@@ -3461,38 +3182,6 @@ const COMMANDS: Record<string, Command> = {
       try {
         for await (const event of client.streamChat(problem, {
           agent: config.defaultAgent,
-          sessionId: config.sessionId,
-          model: config.model,
-        })) {
-          renderer.onEvent(event);
-        }
-      } catch (err: any) {
-        if (err.name !== 'AbortError') console.log(chalk.red(`  Error: ${err.message}`));
-      } finally {
-        renderer.finish();
-      }
-    },
-  },
-
-  research: {
-    description: 'Deep research via Lyra (agent-led)',
-    usage: '/research <topic>  [--depth quick|standard|deep|exhaustive]',
-    handler: async (client, args, config) => {
-      let topic = args;
-      let depth = 'deep';
-      const depthMatch = args.match(/--depth\s+(\S+)/);
-      if (depthMatch) { depth = depthMatch[1]; topic = topic.replace(depthMatch[0], ''); }
-      topic = topic.replace(/^["']|["']$/g, '').trim();
-
-      if (!topic) { console.log(chalk.dim('  Usage: /research <topic> [--depth quick|standard|deep|exhaustive]')); return; }
-
-      const effort = depth === 'exhaustive' ? 10 : depth === 'deep' ? 8 : depth === 'standard' ? 6 : 4;
-      console.log(chalk.dim(`  @lyra researching (${depth}, effort ${effort})...\n`));
-
-      const renderer = (await import('./renderer.js')).createStreamRenderer();
-      try {
-        for await (const event of client.streamChat(topic, {
-          agent: 'lyra',
           sessionId: config.sessionId,
           model: config.model,
         })) {
@@ -3962,12 +3651,15 @@ const COMMANDS: Record<string, Command> = {
       if (!question) { console.log(chalk.dim('  Usage: /repowise <question>')); return; }
       const spinner = ora('Querying Repowise...').start();
       try {
-        const result = await client.post('/repowise/answer', { question }) as any;
+        // Genesis has no /repowise/answer (only a stub overview); the
+        // repowise_get_answer MCP tool proxies the Repowise service's chat/answer.
+        const result = await invokeMcpTool(client, 'repowise_get_answer', { question });
         spinner.stop();
+        if (result?.error) { console.log(chalk.red(`  Error: ${result.error}`)); return; }
         const answer = result?.answer || result?.response || '';
         if (answer) {
           console.log(); console.log(answer); console.log();
-          const refs = result?.references || result?.sources || [];
+          const refs = result?.references || result?.sources || result?.citations || [];
           if (refs.length) {
             console.log(chalk.dim('  Sources:'));
             for (const r of refs.slice(0, 5)) { console.log(chalk.dim(`    - ${r.file || r.path || r}`)); }
@@ -3979,21 +3671,24 @@ const COMMANDS: Record<string, Command> = {
 
   expedition: {
     description: 'Manage expeditions — full autonomous agent orchestration',
-    usage: '/expedition [list|create <name>|status <id>|gate <id> approve|reject|run "<goal>"|stream <id>|cancel <id>]',
+    usage: '/expedition [list|create <name>|status <id>|gate <gate_id> approve|reject|run "<goal>"|stream <id>|cancel <id>]',
     handler: async (client: GenesisClient, args: string) => {
       const parsed = parseQuotedArgs(args.trim());
       const sub = (parsed[0] || 'list').toLowerCase();
       if (sub === 'list') {
         const spinner = ora('Loading expeditions...').start();
         try {
-          const result = await client.get('/expeditions') as any;
+          // The Genesis router is /expedition/* (singular); /expeditions never existed.
+          const result = await client.get('/expedition/list') as any;
           spinner.stop();
+          if (result?.error) { console.log(chalk.red(`  Error: ${result.error}`)); return; }
           const exps = result?.expeditions || result?.items || [];
-          if (!exps.length) { console.log(chalk.dim('  No active expeditions.')); return; }
+          if (!exps.length) { console.log(chalk.dim('  No expeditions.')); return; }
           console.log();
           for (const e of exps) {
-            const status = e.status === 'active' ? chalk.green('active') : e.status === 'paused' ? chalk.yellow('paused') : chalk.dim(e.status);
-            console.log(`  ${status}  ${chalk.bold(e.name || e.id)}  ${chalk.dim(e.id?.slice(0, 8) || '')}`);
+            const status = e.status === 'active' || e.status === 'executing' ? chalk.green(e.status) : e.status === 'paused' || e.status === 'blocked' ? chalk.yellow(e.status) : chalk.dim(e.status);
+            const gates = e.pending_gates ? chalk.yellow(` ${e.pending_gates} gate(s) pending`) : '';
+            console.log(`  ${status}  ${chalk.bold(e.title || e.name || e.id)}  ${chalk.dim(e.id?.slice(0, 8) || '')}${gates}`);
           }
           console.log();
         } catch (e: any) { spinner.stop(); console.log(chalk.red(`  Error: ${e.message}`)); }
@@ -4001,23 +3696,30 @@ const COMMANDS: Record<string, Command> = {
         const name = parsed.slice(1).join(' ');
         const spinner = ora(`Creating expedition "${name}"...`).start();
         try {
-          const result = await client.post('/expeditions', { name, description: name }) as any;
+          // IntakeRequest requires title + goal; the expedition parks on a
+          // human gate in PLANNING, so creating it spends nothing.
+          const result = await client.post('/expedition/intake', { title: name, goal: name, sow: name }) as any;
           spinner.stop();
-          console.log(chalk.green(`  Created: ${result?.id || result?.expedition_id || 'OK'}`));
+          if (result?.error) { console.log(chalk.red(`  Error: ${result.error}`)); return; }
+          console.log(chalk.green(`  Created: ${result?.expedition_id || result?.id || 'OK'}`));
         } catch (e: any) { spinner.stop(); console.log(chalk.red(`  Error: ${e.message}`)); }
       } else if (sub === 'status' && parsed[1]) {
         const spinner = ora('Loading...').start();
         try {
-          const result = await client.get(`/expeditions/${parsed[1]}`);
+          const result = await client.get(`/expedition/${encodeURIComponent(parsed[1])}/status`) as any;
           spinner.stop();
+          if (result?.error) { console.log(chalk.red(`  Error: ${result.error}`)); return; }
           console.log(); console.log(JSON.stringify(result, null, 2)); console.log();
         } catch (e: any) { spinner.stop(); console.log(chalk.red(`  Error: ${e.message}`)); }
       } else if (sub === 'gate' && parsed[1] && parsed[2]) {
         const action = parsed[2].toLowerCase();
+        if (action !== 'approve' && action !== 'reject') { console.log(chalk.dim('  Usage: /expedition gate <gate_id> approve|reject [notes]')); return; }
         const spinner = ora(`${action === 'approve' ? 'Approving' : 'Rejecting'} gate...`).start();
         try {
-          await client.post(`/expeditions/${parsed[1]}/gate`, { action });
+          // Gates are globally addressed: POST /expedition/gates/{gate_id}/respond.
+          const result = await client.post(`/expedition/gates/${encodeURIComponent(parsed[1])}/respond`, { approved: action === 'approve', notes: parsed.slice(3).join(' ') }) as any;
           spinner.stop();
+          if (result?.error) { console.log(chalk.red(`  Error: ${result.error}`)); return; }
           console.log(chalk.green(`  Gate ${action}d.`));
         } catch (e: any) { spinner.stop(); console.log(chalk.red(`  Error: ${e.message}`)); }
       } else if (sub === 'run' && parsed[1]) {
@@ -4122,7 +3824,7 @@ const COMMANDS: Record<string, Command> = {
           console.log(chalk.green(`  Expedition ${parsed[1]} cancelled.`));
         } catch (e: any) { spinner.stop(); console.log(chalk.red(`  Error: ${e.message}`)); }
       } else {
-        console.log(chalk.dim('  Usage: /expedition [list|create <name>|status <id>|gate <id> approve|reject|run "<goal>"|stream <id>|cancel <id>]'));
+        console.log(chalk.dim('  Usage: /expedition [list|create <name>|status <id>|gate <gate_id> approve|reject|run "<goal>"|stream <id>|cancel <id>]'));
       }
     },
   },
@@ -4241,35 +3943,53 @@ const COMMANDS: Record<string, Command> = {
 
   github: {
     description: 'GitHub operations',
-    usage: '/github [prs|issues|releases|ci|merge <pr>]',
-    handler: async (client: GenesisClient, args: string) => {
-      const parts = args.trim().split(/\s+/);
+    usage: '/github [prs|issues|releases|ci|merge <pr> [--squash|--merge|--rebase]]',
+    handler: async (_client: GenesisClient, args: string) => {
+      // Genesis serves no /github/prs|issues|releases|ci routes (only the
+      // */tick jobs), so this runs the gh CLI against the current repo with the
+      // user's own gh auth. Arguments go as an argv array — never a shell string.
+      const parts = args.trim().split(/\s+/).filter(Boolean);
       const sub = (parts[0] || 'prs').toLowerCase();
-      const listEndpoints: Record<string, string> = { prs: '/github/prs', issues: '/github/issues', releases: '/github/releases', ci: '/github/ci/status' };
-      const endpoint = listEndpoints[sub];
-      if (endpoint) {
+      const listArgs: Record<string, string[]> = {
+        prs: ['pr', 'list', '--limit', '15', '--json', 'number,title,state'],
+        issues: ['issue', 'list', '--limit', '15', '--json', 'number,title,state'],
+        releases: ['release', 'list', '--limit', '15', '--json', 'tagName,name,isLatest'],
+        ci: ['run', 'list', '--limit', '15', '--json', 'displayTitle,workflowName,status,conclusion'],
+      };
+      const runGh = (ghArgs: string[], inherit = false) => spawnSync('gh', ghArgs, {
+        encoding: 'utf-8', timeout: 60000, stdio: inherit ? 'inherit' : 'pipe', shell: false,
+      });
+      const ghArgs = listArgs[sub];
+      if (ghArgs) {
         const spinner = ora(`Loading ${sub}...`).start();
-        try {
-          const result = await client.get(endpoint) as any;
-          spinner.stop();
-          const items = result?.items || result?.prs || result?.issues || result?.releases || result?.workflows || [];
-          if (!items.length) { console.log(chalk.dim(`  No ${sub} found.`)); return; }
-          console.log();
-          for (const item of items.slice(0, 15)) {
-            const title = item.title || item.name || item.tag_name || item.workflow || '';
-            const num = item.number ? chalk.cyan(`#${item.number}`) : '';
-            const state = item.state === 'open' ? chalk.green('open') : item.state === 'closed' ? chalk.red('closed') : chalk.dim(item.state || item.status || '');
-            console.log(`  ${num} ${chalk.bold(title)}  ${state}`);
-          }
-          console.log();
-        } catch (e: any) { spinner.stop(); console.log(chalk.red(`  Error: ${e.message}`)); }
+        const r = runGh(ghArgs);
+        spinner.stop();
+        if (r.error || r.status !== 0) {
+          const why = (r.error as any)?.code === 'ENOENT' ? 'gh CLI not installed (https://cli.github.com)' : (r.stderr || r.error?.message || `gh exited ${r.status}`).trim();
+          console.log(chalk.red(`  Error: ${why}`));
+          return;
+        }
+        let items: any[] = [];
+        try { items = JSON.parse(r.stdout || '[]'); } catch { console.log(r.stdout); return; }
+        if (!items.length) { console.log(chalk.dim(`  No ${sub} found.`)); return; }
+        console.log();
+        for (const item of items.slice(0, 15)) {
+          const title = item.title || item.displayTitle || item.name || item.tagName || item.workflowName || '';
+          const num = item.number ? chalk.cyan(`#${item.number}`) : item.tagName ? chalk.cyan(item.tagName) : '';
+          const st = String(item.state || item.conclusion || item.status || (item.isLatest ? 'latest' : '')).toLowerCase();
+          const state = st === 'open' || st === 'success' || st === 'latest' ? chalk.green(st) : st === 'closed' || st === 'failure' ? chalk.red(st) : chalk.dim(st);
+          console.log(`  ${num} ${chalk.bold(title)}  ${state}`);
+        }
+        console.log();
       } else if (sub === 'merge' && parts[1]) {
-        const spinner = ora(`Merging PR #${parts[1]}...`).start();
-        try {
-          const result = await client.post(`/github/prs/${parts[1]}/merge`, {}) as any;
-          spinner.stop();
-          console.log(chalk.green(`  PR #${parts[1]} merged: ${result?.sha?.slice(0, 8) || 'OK'}`));
-        } catch (e: any) { spinner.stop(); console.log(chalk.red(`  Error: ${e.message}`)); }
+        if (!/^\d+$/.test(parts[1])) { console.log(chalk.red('  PR number must be numeric.')); return; }
+        // Extra flags (--squash/--merge/--rebase/--auto) pass through; with none,
+        // gh asks interactively, so stdio is inherited.
+        const r = runGh(['pr', 'merge', parts[1], ...parts.slice(2)], true);
+        if (r.error || r.status !== 0) {
+          const why = (r.error as any)?.code === 'ENOENT' ? 'gh CLI not installed (https://cli.github.com)' : `gh exited ${r.status}`;
+          console.log(chalk.red(`  Error: ${why}`));
+        }
       } else {
         console.log(chalk.dim('  Usage: /github [prs|issues|releases|ci|merge <pr_number>]'));
       }
@@ -4689,8 +4409,8 @@ const COMMANDS: Record<string, Command> = {
 
   rbac: {
     description: 'Manage roles, users, and groups',
-    usage: '/rbac [users|roles|groups|check <user> <permission>]',
-    handler: async (client: GenesisClient, args: string) => {
+    usage: '/rbac [users|roles|groups|check <user_id> <resource>:<action> [scope]]',
+    handler: async (client: GenesisClient, args: string, config: ShellConfig) => {
       const parts = args.trim().split(/\s+/);
       const sub = (parts[0] || 'users').toLowerCase();
       const endpoints: Record<string, string> = { users: '/rbac/users', roles: '/rbac/roles', groups: '/rbac/groups' };
@@ -4710,67 +4430,70 @@ const COMMANDS: Record<string, Command> = {
           console.log();
         } catch (e: any) { spinner.stop(); console.log(chalk.red(`  Error: ${e.message}`)); }
       } else if (sub === 'check' && parts[1] && parts[2]) {
+        // Genesis has no /rbac/check; the permission check lives on Identity
+        // (POST /auth/check-permission, PermissionCheckRequest). Identity
+        // enforces who may check whom from the bearer, not from this payload.
+        const sep = parts[2].search(/[:.](?=[^:.]*$)/);
+        if (sep <= 0 || sep === parts[2].length - 1) { console.log(chalk.dim('  Usage: /rbac check <user_id> <resource>:<action> [scope]')); return; }
+        const resource = parts[2].slice(0, sep);
+        const action = parts[2].slice(sep + 1);
+        const token = getActiveToken();
+        if (!token) { console.log(chalk.red('  Not logged in. Use /login first.')); return; }
         const spinner = ora('Checking permission...').start();
         try {
-          const result = await client.post('/rbac/check', { user: parts[1], permission: parts[2] }) as any;
+          const resp = await fetch(`${config.identityUrl}/auth/check-permission`, {
+            method: 'POST',
+            headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ user_id: parts[1], resource, action, scope: parts[3] || '*' }),
+            signal: AbortSignal.timeout(10000),
+          });
+          const result = await resp.json().catch(() => ({})) as any;
           spinner.stop();
-          const allowed = result?.allowed ?? result?.granted ?? false;
+          if (!resp.ok) { console.log(chalk.red(`  Error: ${result?.detail || resp.statusText}`)); return; }
+          const allowed = result?.allowed === true;
           console.log(allowed ? chalk.green(`  ${parts[1]} has ${parts[2]}`) : chalk.red(`  ${parts[1]} lacks ${parts[2]}`));
         } catch (e: any) { spinner.stop(); console.log(chalk.red(`  Error: ${e.message}`)); }
       } else {
-        console.log(chalk.dim('  Usage: /rbac [users|roles|groups|check <user> <permission>]'));
+        console.log(chalk.dim('  Usage: /rbac [users|roles|groups|check <user_id> <resource>:<action> [scope]]'));
       }
     },
   },
 
   acc: {
-    description: 'AVEC code analysis via ACC engine',
-    usage: '/acc [node <id>|friction|unstable|stats]',
+    // The ACC engine (AVEC friction/stability scores) is decommissioned; its
+    // /acc/* routes are served by nothing. CodeGraph superseded it -- Genesis
+    // proxies /codegraph/* to it (routers/codegraph.py).
+    description: 'Code analysis via CodeGraph (successor to the retired ACC engine)',
+    usage: '/acc [stats|node <symbol>]',
     handler: async (client: GenesisClient, args: string) => {
       const parts = args.trim().split(/\s+/);
       const sub = (parts[0] || 'stats').toLowerCase();
       if (sub === 'stats') {
-        const spinner = ora('Loading ACC stats...').start();
+        const spinner = ora('Loading CodeGraph stats...').start();
         try {
-          const result = await client.get('/acc/stats');
+          const result = await client.get('/codegraph/stats') as any;
+          spinner.stop();
+          console.log();
+          if (result && result.available === false) {
+            console.log(chalk.yellow('  CodeGraph has no index yet -- run /project index or the codegraph_trigger_index tool'));
+          } else {
+            console.log(`  Chunks: ${chalk.cyan(String(result?.chunks ?? '?'))}  Files: ${chalk.cyan(String(result?.files_indexed ?? '?'))}  Semantic search: ${result?.semantic_search === 'ok' ? chalk.green('ok') : chalk.yellow(String(result?.semantic_search ?? '?'))}`);
+            if (result?.warning) console.log(chalk.yellow(`  ${result.warning}`));
+          }
+          console.log();
+        } catch (e: any) { spinner.stop(); console.log(chalk.red(`  Error: ${e.message}`)); }
+      } else if (sub === 'node' && parts[1]) {
+        const spinner = ora(`Analyzing impact of ${parts[1]}...`).start();
+        try {
+          const result = await client.get(`/codegraph/impact/${encodeURIComponent(parts[1])}`) as any;
           spinner.stop();
           console.log(); console.log(JSON.stringify(result, null, 2)); console.log();
         } catch (e: any) { spinner.stop(); console.log(chalk.red(`  Error: ${e.message}`)); }
-      } else if (sub === 'node' && parts[1]) {
-        const spinner = ora(`Analyzing ${parts[1]}...`).start();
-        try {
-          const result = await client.get(`/acc/node/${encodeURIComponent(parts[1])}`) as any;
-          spinner.stop();
-          console.log();
-          if (result?.avec) {
-            const a = result.avec;
-            console.log(`  ${chalk.bold(result.name || parts[1])}`);
-            console.log(`  Stability: ${chalk.cyan(String(a.stability?.toFixed(2) ?? '?'))}  Friction: ${chalk.yellow(String(a.friction?.toFixed(2) ?? '?'))}  Logic: ${chalk.green(String(a.logic?.toFixed(2) ?? '?'))}  Autonomy: ${chalk.magenta(String(a.autonomy?.toFixed(2) ?? '?'))}`);
-          } else { console.log(JSON.stringify(result, null, 2)); }
-          console.log();
-        } catch (e: any) { spinner.stop(); console.log(chalk.red(`  Error: ${e.message}`)); }
-      } else if (sub === 'friction') {
-        const spinner = ora('Finding high-friction nodes...').start();
-        try {
-          const result = await client.get('/acc/high-friction') as any;
-          spinner.stop();
-          const nodes = result?.nodes || [];
-          console.log();
-          for (const n of nodes.slice(0, 15)) { console.log(`  ${chalk.yellow(String(n.friction?.toFixed(2)))}  ${n.name || n.id}`); }
-          console.log();
-        } catch (e: any) { spinner.stop(); console.log(chalk.red(`  Error: ${e.message}`)); }
-      } else if (sub === 'unstable') {
-        const spinner = ora('Finding unstable nodes...').start();
-        try {
-          const result = await client.get('/acc/unstable') as any;
-          spinner.stop();
-          const nodes = result?.nodes || [];
-          console.log();
-          for (const n of nodes.slice(0, 15)) { console.log(`  ${chalk.red(String(n.stability?.toFixed(2)))}  ${n.name || n.id}`); }
-          console.log();
-        } catch (e: any) { spinner.stop(); console.log(chalk.red(`  Error: ${e.message}`)); }
+      } else if (sub === 'friction' || sub === 'unstable') {
+        console.log(chalk.yellow(`  /acc ${sub} was an ACC-engine score; that engine is retired and nothing replaced the score.`));
+        console.log(chalk.dim('  Use /acc node <symbol> (blast radius), /codegraph <query>, or the codebase_intel_assess tool.'));
       } else {
-        console.log(chalk.dim('  Usage: /acc [node <id>|friction|unstable|stats]'));
+        console.log(chalk.dim('  Usage: /acc [stats|node <symbol>]'));
       }
     },
   },
@@ -4778,43 +4501,47 @@ const COMMANDS: Record<string, Command> = {
   sttp: {
     description: 'Session memory via STTP',
     usage: '/sttp [calibrate|store <content>|get|list]',
-    handler: async (client: GenesisClient, args: string) => {
+    // STTP is an external gateway (config/services.yaml `STTP`), not a Genesis router:
+    // the old /sttp/* Genesis paths never existed. The owning surface is the awnode
+    // MCP module apps/awnode/tools/mcp/mcp_sttp.py, reached through invokeMcpTool.
+    handler: async (client: GenesisClient, args: string, config: ShellConfig) => {
       const parts = args.trim().split(/\s+/);
       const sub = (parts[0] || 'list').toLowerCase();
-      if (sub === 'list') {
-        const spinner = ora('Loading STTP nodes...').start();
+      const sessionId = config?.sessionId || 'aither-shell';
+      const run = async (label: string, tool: string, params: Record<string, any>) => {
+        const spinner = ora(label).start();
         try {
-          const result = await client.get('/sttp/nodes') as any;
+          return await invokeMcpTool(client, tool, params);
+        } finally {
           spinner.stop();
-          const nodes = result?.nodes || [];
-          if (!nodes.length) { console.log(chalk.dim('  No STTP nodes.')); return; }
-          console.log();
-          for (const n of nodes.slice(0, 10)) { console.log(`  ${chalk.cyan('-')} ${n.label || n.id} ${chalk.dim(n.session_id?.slice(0, 8) || '')}`); }
-          console.log();
-        } catch (e: any) { spinner.stop(); console.log(chalk.red(`  Error: ${e.message}`)); }
+        }
+      };
+      if (sub === 'list') {
+        const result = await run('Loading STTP nodes...', 'sttp_list_nodes', { limit: 10 });
+        if (result?.error) { console.log(chalk.red(`  Error: ${result.error}`)); return; }
+        const nodes = Array.isArray(result) ? result : (result?.nodes || []);
+        if (!nodes.length) { console.log(chalk.dim('  No STTP nodes.')); return; }
+        console.log();
+        for (const n of nodes.slice(0, 10)) {
+          const sid = String(n.sessionId || n.session_id || '').slice(0, 8);
+          console.log(`  ${chalk.cyan('-')} ${n.label || n.id || n.nodeId || '?'} ${chalk.dim(sid)}`);
+        }
+        console.log();
       } else if (sub === 'store') {
         const content = parts.slice(1).join(' ');
         if (!content) { console.log(chalk.dim('  Usage: /sttp store <content>')); return; }
-        const spinner = ora('Storing context...').start();
-        try {
-          const result = await client.post('/sttp/store', { content, source: 'aither-shell' }) as any;
-          spinner.stop();
-          console.log(chalk.green(`  Stored: ${result?.node_id || 'OK'}`));
-        } catch (e: any) { spinner.stop(); console.log(chalk.red(`  Error: ${e.message}`)); }
+        const result = await run('Storing context...', 'sttp_store_context', { session_id: sessionId, node: content });
+        if (result?.error) { console.log(chalk.red(`  Error: ${result.error}`)); return; }
+        console.log(chalk.green(`  Stored: ${result?.nodeId || result?.node_id || result?.id || 'OK'}`));
       } else if (sub === 'get') {
-        const spinner = ora('Retrieving context...').start();
-        try {
-          const result = await client.get('/sttp/context');
-          spinner.stop();
-          console.log(); console.log(JSON.stringify(result, null, 2)); console.log();
-        } catch (e: any) { spinner.stop(); console.log(chalk.red(`  Error: ${e.message}`)); }
+        const result = await run('Retrieving context...', 'sttp_get_context', { session_id: sessionId });
+        if (result?.error) { console.log(chalk.red(`  Error: ${result.error}`)); return; }
+        console.log(); console.log(JSON.stringify(result, null, 2)); console.log();
       } else if (sub === 'calibrate') {
-        const spinner = ora('Calibrating session...').start();
-        try {
-          const result = await client.post('/sttp/calibrate', { source: 'aither-shell' }) as any;
-          spinner.stop();
-          console.log(chalk.green(`  Calibrated. Drift: ${result?.drift?.toFixed(3) ?? '?'}`));
-        } catch (e: any) { spinner.stop(); console.log(chalk.red(`  Error: ${e.message}`)); }
+        const result = await run('Calibrating session...', 'sttp_calibrate_session', { session_id: sessionId, trigger: 'aither-shell' });
+        if (result?.error) { console.log(chalk.red(`  Error: ${result.error}`)); return; }
+        const drift = result?.drift ?? result?.delta?.magnitude;
+        console.log(chalk.green(`  Calibrated. Drift: ${typeof drift === 'number' ? drift.toFixed(3) : (drift ?? '?')}`));
       } else {
         console.log(chalk.dim('  Usage: /sttp [calibrate|store <content>|get|list]'));
       }
@@ -5109,20 +4836,31 @@ const COMMANDS: Record<string, Command> = {
   speak: {
     description: 'Text-to-speech via Lyra',
     usage: '/speak <text> [--voice <name>]',
-    handler: async (client: GenesisClient, args: string) => {
+    // Genesis mounts no /voice/* route. TTS is the AitherVoice service, resolved the
+    // same way the TUI's spoken answers resolve it (local perception port, or the
+    // gateway's /voice prefix with the caller's key) -- tui/service-endpoint.ts.
+    handler: async (_client: GenesisClient, args: string, config: ShellConfig) => {
       let text = args;
       let voice: string | undefined;
       const voiceMatch = args.match(/--voice\s+(\S+)/);
       if (voiceMatch) { voice = voiceMatch[1]; text = text.replace(voiceMatch[0], ''); }
       text = text.trim();
       if (!text) { console.log(chalk.dim('  Usage: /speak <text> [--voice <name>]')); return; }
+      const { resolveServiceEndpoint } = await import('./tui/service-endpoint.js');
+      const { synthesize, play } = await import('./tui/voice.js');
+      const ep = resolveServiceEndpoint(config, 'voice');
       const spinner = ora('Synthesizing speech...').start();
       try {
-        const result = await client.post('/voice/synthesize', { text, voice }) as any;
+        const result = await synthesize(text, {
+          baseUrl: ep.baseUrl, fallbackUrl: ep.fallbackUrl, headers: ep.headers, voice,
+        });
         spinner.stop();
-        const url = result?.url || result?.audio_url || '';
-        if (url) { console.log(chalk.green(`  Audio: ${url}`)); }
-        else { console.log(chalk.green('  Speech synthesized.')); }
+        if (!result.ok || !result.path) {
+          console.log(chalk.red(`  Error: ${result.error || 'voice service returned no audio'}`));
+          return;
+        }
+        console.log(chalk.green(`  Audio: ${result.path}`));
+        await play(result.path);
       } catch (e: any) { spinner.stop(); console.log(chalk.red(`  Error: ${e.message}`)); }
     },
   },
@@ -5570,89 +5308,104 @@ async function _downloadArtifact(
 // Sandbox + IDE commands
 // ═══════════════════════════════════════════════════════════════════════════════
 
+// Genesis serves NO /sandbox/sessions route (only /sandbox/execute, /execute/shell,
+// /allowed-imports, /preview ...). Every /sandbox, /ide and /preview call against it
+// was a 404 the handlers rendered as "No active sandbox sessions". A sandbox session
+// is owned by a dev environment (routers/dev_env.py, /dev-env/*), which records its
+// `sandbox_session_id` -- so these commands read and drive sandboxes through that
+// router, the same one /dev uses.
+async function listSandboxEnvs(client: GenesisClient): Promise<any[]> {
+  const data = await client.get('/dev-env/list') as any;
+  return Array.isArray(data?.envs) ? data.envs : [];
+}
+
+/** Match a dev env by env_id or sandbox session id prefix (both are printed to the user). */
+function matchSandboxEnv(envs: any[], id: string): any | undefined {
+  return envs.find((e: any) =>
+    String(e.env_id || '').startsWith(id)
+    || String(e.sandbox_session_id || '').startsWith(id));
+}
+
+function printExecOutput(result: any): void {
+  if (result?.error) { console.log(chalk.red(`  ${result.error}`)); return; }
+  const out = result?.output;
+  if (typeof out === 'string') { console.log(out); return; }
+  if (out?.stdout) console.log(out.stdout);
+  if (out?.stderr) console.log(chalk.red(out.stderr));
+  const code = out?.returncode ?? out?.exit_code ?? result?.status;
+  if (code !== undefined) console.log(chalk.dim(`  Exit: ${code}`));
+}
+
 COMMANDS['sandbox'] = {
   description: 'Manage sandbox sessions (list, create, stop, exec)',
-  usage: '/sandbox [list | create [name] | stop <id> | exec <id> <command> | files <id>]',
+  usage: '/sandbox [list | create [name] [lang] | stop <id> | exec <id> <command> | files <id> | test <id> [file]]',
   handler: async (client: GenesisClient, args: string) => {
     const parts = args.trim().split(/\s+/);
     const sub = parts[0] || 'list';
 
     if (sub === 'list' || sub === 'ls') {
-      const data = await client.get('/sandbox/sessions') as any;
-      if (data?.error) { console.log(chalk.red(`  Error: ${data.error}`)); return; }
-      const sessions = data?.sessions || [];
-      if (sessions.length === 0) {
+      const envs = await listSandboxEnvs(client);
+      if (envs.length === 0) {
         console.log(chalk.dim('  No active sandbox sessions.'));
         console.log(chalk.dim('  Create one: /sandbox create [name]'));
         return;
       }
       console.log(chalk.bold('\n  Sandbox Sessions\n'));
-      for (const s of sessions) {
-        const status = s.status === 'running' ? chalk.green('●') : s.status === 'error' ? chalk.red('●') : chalk.yellow('●');
-        const expires = Math.round(s.expires_in / 60);
-        console.log(`  ${status} ${chalk.cyan(s.session_id.slice(0, 8))} ${s.name} (${s.language}) — ${s.files_written?.length || 0} files, ${s.execution_count} runs, ${expires}m remaining`);
-        if (s.task_description) console.log(chalk.dim(`    Task: ${s.task_description.slice(0, 80)}`));
+      for (const e of envs) {
+        const status = e.status === 'running' ? chalk.green('●') : e.status === 'error' ? chalk.red('●') : chalk.yellow('●');
+        const sid = String(e.sandbox_session_id || '').slice(0, 8) || chalk.dim('no-sandbox');
+        console.log(`  ${status} ${chalk.cyan(sid)} ${e.name} (${e.language}) — ${e.executions || 0} runs ${chalk.dim(`[env ${String(e.env_id).slice(0, 12)}]`)}`);
+        if (e.description) console.log(chalk.dim(`    Task: ${String(e.description).slice(0, 80)}`));
       }
       console.log();
     } else if (sub === 'create' || sub === 'new') {
-      const name = parts[1] || undefined;
+      const name = parts[1] || 'sandbox';
       const lang = parts[2] || 'python';
       const spinner = ora({ text: 'Creating sandbox session...', color: 'yellow' }).start();
-      const data = await client.post('/sandbox/sessions', { name, language: lang, with_container: true }) as any;
+      const data = await client.post('/dev-env/create', { name, language: lang, auto_agent: false }) as any;
       spinner.stop();
       if (data?.error) { console.log(chalk.red(`  Error: ${data.error}`)); return; }
-      console.log(chalk.green(`  ✓ Session created: ${chalk.bold(data.session_id?.slice(0, 8))}`));
-      console.log(chalk.dim(`    Name: ${data.name}`));
-      console.log(chalk.dim(`    Language: ${data.language}`));
-      console.log(chalk.dim(`    Status: ${data.status}`));
-      console.log(chalk.dim(`    Container: ${data.container_name || 'filesystem-only'}`));
-      console.log(chalk.cyan(`\n  Open in IDE: /ide ${data.session_id?.slice(0, 8)}`));
+      const env = data?.env || {};
+      if (!env.sandbox_session_id) {
+        console.log(chalk.red(`  Sandbox could not be started (status: ${env.status || 'unknown'}).`));
+        return;
+      }
+      console.log(chalk.green(`  ✓ Session created: ${chalk.bold(String(env.sandbox_session_id).slice(0, 8))}`));
+      console.log(chalk.dim(`    Name: ${env.name}`));
+      console.log(chalk.dim(`    Language: ${env.language}`));
+      console.log(chalk.dim(`    Status: ${env.status}`));
+      console.log(chalk.cyan(`\n  Open in IDE: /ide ${String(env.sandbox_session_id).slice(0, 8)}`));
     } else if (sub === 'stop' || sub === 'rm' || sub === 'delete') {
       const id = parts[1];
       if (!id) { console.log(chalk.yellow('  Usage: /sandbox stop <session-id>')); return; }
-      // Try to match partial ID
-      const sessions = ((await client.get('/sandbox/sessions') as any)?.sessions || []);
-      const match = sessions.find((s: any) => s.session_id.startsWith(id));
+      const match = matchSandboxEnv(await listSandboxEnvs(client), id);
       if (!match) { console.log(chalk.red(`  Session not found: ${id}`)); return; }
-      await client.delete(`/sandbox/sessions/${match.session_id}`);
+      await client.delete(`/dev-env/${match.env_id}`);
       console.log(chalk.green(`  ✓ Session ${id} stopped and cleaned up.`));
     } else if (sub === 'exec' || sub === 'run') {
       const id = parts[1];
       const cmd = parts.slice(2).join(' ');
       if (!id || !cmd) { console.log(chalk.yellow('  Usage: /sandbox exec <id> <command>')); return; }
-      const sessions = ((await client.get('/sandbox/sessions') as any)?.sessions || []);
-      const match = sessions.find((s: any) => s.session_id.startsWith(id));
+      const match = matchSandboxEnv(await listSandboxEnvs(client), id);
       if (!match) { console.log(chalk.red(`  Session not found: ${id}`)); return; }
-      const result = await client.post(`/sandbox/sessions/${match.session_id}/execute`, { command: cmd }) as any;
-      if (result?.stdout) console.log(result.stdout);
-      if (result?.stderr) console.log(chalk.red(result.stderr));
-      console.log(chalk.dim(`  Exit: ${result?.returncode ?? result?.status}`));
+      printExecOutput(await client.post('/dev-env/exec', { env_id: match.env_id, command: cmd }));
     } else if (sub === 'files') {
       const id = parts[1];
       if (!id) { console.log(chalk.yellow('  Usage: /sandbox files <id>')); return; }
-      const sessions = ((await client.get('/sandbox/sessions') as any)?.sessions || []);
-      const match = sessions.find((s: any) => s.session_id.startsWith(id));
+      const match = matchSandboxEnv(await listSandboxEnvs(client), id);
       if (!match) { console.log(chalk.red(`  Session not found: ${id}`)); return; }
-      const data = await client.get(`/sandbox/sessions/${match.session_id}/files`) as any;
-      const entries = data?.entries || [];
-      if (entries.length === 0) { console.log(chalk.dim('  (empty workspace)')); return; }
-      for (const e of entries) {
-        const icon = e.type === 'directory' ? '📁' : '📄';
-        const size = e.size != null ? chalk.dim(` (${e.size} bytes)`) : '';
-        console.log(`  ${icon} ${e.name}${size}`);
-      }
+      printExecOutput(await client.post('/dev-env/exec', { env_id: match.env_id, command: 'ls -la' }));
     } else if (sub === 'test') {
       const id = parts[1];
       if (!id) { console.log(chalk.yellow('  Usage: /sandbox test <id> [file]')); return; }
-      const sessions = ((await client.get('/sandbox/sessions') as any)?.sessions || []);
-      const match = sessions.find((s: any) => s.session_id.startsWith(id));
+      const match = matchSandboxEnv(await listSandboxEnvs(client), id);
       if (!match) { console.log(chalk.red(`  Session not found: ${id}`)); return; }
-      const file = parts[2] || undefined;
+      const file = parts[2];
+      const cmd = file ? `python -m pytest -q ${file}` : 'python -m pytest -q';
       const spinner = ora({ text: 'Running tests...', color: 'yellow' }).start();
-      const result = await client.post(`/sandbox/sessions/${match.session_id}/test`, { file }) as any;
+      const result = await client.post('/dev-env/exec', { env_id: match.env_id, command: cmd });
       spinner.stop();
-      if (result?.stdout) console.log(result.stdout);
-      if (result?.stderr) console.log(chalk.red(result.stderr));
+      printExecOutput(result);
     } else {
       console.log(chalk.yellow('  Unknown subcommand. Use: list, create, stop, exec, files, test'));
     }
@@ -5667,15 +5420,13 @@ COMMANDS['ide'] = {
     const baseUrl = process.env.FORGEIDE_URL || 'https://forge.aitherium.com';
 
     if (sessionId) {
-      // Find the session
-      const sessions = ((await client.get('/sandbox/sessions') as any)?.sessions || []);
-      const match = sessions.find((s: any) => s.session_id.startsWith(sessionId));
-      if (!match) {
+      const match = matchSandboxEnv(await listSandboxEnvs(client), sessionId);
+      if (!match || !match.sandbox_session_id) {
         console.log(chalk.red(`  Session not found: ${sessionId}`));
         console.log(chalk.dim('  Use /sandbox list to see active sessions'));
         return;
       }
-      const url = `${baseUrl}/ide?session=${match.session_id}`;
+      const url = `${baseUrl}/ide?session=${match.sandbox_session_id}`;
       console.log(chalk.cyan(`  Opening ForgeIDE for session ${match.name}...`));
       console.log(chalk.dim(`  URL: ${url}`));
       try { execSync(`start "" "${url}"`); } catch { /* ignore */ }
@@ -5688,37 +5439,30 @@ COMMANDS['ide'] = {
 };
 
 COMMANDS['preview'] = {
-  description: 'List active preview containers or open one in browser',
+  description: 'List sandbox sessions or open one in ForgeIDE preview',
   usage: '/preview [session-id]',
   handler: async (client: GenesisClient, args: string) => {
     const id = args.trim();
+    const baseUrl = process.env.FORGEIDE_URL || 'https://forge.aitherium.com';
+    const envs = (await listSandboxEnvs(client)).filter((e: any) => e.sandbox_session_id);
     if (id) {
-      const sessions = ((await client.get('/sandbox/sessions') as any)?.sessions || []);
-      const match = sessions.find((s: any) => s.session_id.startsWith(id));
+      const match = matchSandboxEnv(envs, id);
       if (!match) {
         console.log(chalk.red(`  Session not found: ${id}`));
         return;
       }
-      if (match.preview_url) {
-        console.log(chalk.cyan(`  Preview: ${match.preview_url}`));
-        try { execSync(`start "" "${match.preview_url}"`); } catch { /* ignore */ }
-      } else if (match.container_port) {
-        const url = `http://localhost:${match.container_port}`;
-        console.log(chalk.cyan(`  Container available at: ${url}`));
-      } else {
-        console.log(chalk.dim('  No preview URL available for this session.'));
-      }
+      const url = `${baseUrl}/ide?session=${match.sandbox_session_id}`;
+      console.log(chalk.cyan(`  Preview: ${url}`));
+      try { execSync(`start "" "${url}"`); } catch { /* ignore */ }
     } else {
-      // List all previews
-      const data = await client.get('/sandbox/sessions') as any;
-      const sessions = (data?.sessions || []).filter((s: any) => s.status === 'running');
-      if (sessions.length === 0) {
+      const running = envs.filter((e: any) => e.status === 'running');
+      if (running.length === 0) {
         console.log(chalk.dim('  No active sandbox sessions with previews.'));
         return;
       }
-      for (const s of sessions) {
-        const url = s.preview_url || (s.container_port ? `http://localhost:${s.container_port}` : 'none');
-        console.log(`  ${chalk.cyan(s.session_id.slice(0, 8))} ${s.name} → ${url}`);
+      for (const e of running) {
+        const sid = String(e.sandbox_session_id);
+        console.log(`  ${chalk.cyan(sid.slice(0, 8))} ${e.name} → ${baseUrl}/ide?session=${sid}`);
       }
     }
   },
@@ -7464,6 +7208,29 @@ COMMANDS['storage'] = {
   },
 };
 
+// `/ops <noun> <verb> [k=v] [--apply] [--agent genesis] [--watch]` — the platform
+// control plane (Genesis /platform/ops/v1, verbs from GET /catalog). `/backups` is
+// the noun alias. Parsing and rendering live in ops-command.ts (shared with
+// `aither ops …` in main.ts and test/ops-args.test.ts).
+COMMANDS['ops'] = {
+  description: 'Platform ops: aither ops <noun> <verb> [k=v] (dry run unless --apply)',
+  usage: '/ops <noun> <verb> [k=v] [--apply] [--agent genesis] [--watch] | runs | show <id> | approve <id>',
+  handler: async (client: GenesisClient, args: string) => {
+    const { runOpsCommand } = await import('./ops-command.js');
+    await runOpsCommand(parseQuotedArgs(args.trim()), client);
+  },
+};
+
+COMMANDS['backups'] = {
+  description: 'Backups: state | verify | run | restore set_id=… target_dir=/tmp/…',
+  usage: '/backups [state|verify|run|restore] [k=v] [--apply] [--agent genesis] [--watch]',
+  handler: async (client: GenesisClient, args: string) => {
+    const { runOpsCommand } = await import('./ops-command.js');
+    const argv = parseQuotedArgs(args.trim());
+    await runOpsCommand(['backups', ...(argv.length ? argv : ['state'])], client);
+  },
+};
+
 // `/claude <task…>` — hand a task to a scoped Claude Code subagent through the adk
 // runner. Same shape as `/storage` above: the parsing and the shell-out live in
 // claude-command.ts (shared with `aither claude …` in main.ts and with
@@ -7477,31 +7244,45 @@ COMMANDS['claude'] = {
   },
 };
 
+// `/solve [toy|arc] [game] [--flag value…]` — run the reasoning loop through the adk CLI.
+// Parsing and the shell-out live in solve-command.ts (shared with `aither solve …` in
+// main.ts and test/solve-command.test.ts). Not `/arc`, which steers the fleet solver.
+COMMANDS['solve'] = {
+  description: 'Run the reasoning loop once (adk solve)',
+  usage: '/solve [toy|arc] [game] [--max-calls N] [--wall-s S] [--tier reasoning]',
+  handler: async (_client: GenesisClient, args: string) => {
+    const { runSolveCommand } = await import('./solve-command.js');
+    await runSolveCommand(parseQuotedArgs(args.trim()));
+  },
+};
+
 /* ═══════════════════════════════════════════════════════════════════════════════
  * AUTONOMOUS AGENT COMMANDS — Calendar, Mail, Will, Escalate, Research, Publish
  * ═══════════════════════════════════════════════════════════════════════════════ */
 
 COMMANDS['calendar'] = {
   description: 'Manage calendar events',
-  usage: '/calendar [list|create "<title>" --start <ISO> [--end <ISO>]|delete <id>|sync]',
+  usage: '/calendar [list|create "<title>" --start <ISO> [--end <ISO>]|delete <id>|sync [provider]]',
+  // Genesis serves no /calendar CRUD (only /scheduler/calendar); the calendar_*
+  // MCP tools front the calendar service. Tenant scope comes from the
+  // authenticated caller, so no tenant_id is sent from here.
   handler: async (client: GenesisClient, args: string) => {
     const parsed = parseQuotedArgs(args.trim());
     const sub = (parsed[0] || 'list').toLowerCase();
     if (sub === 'list') {
       const spinner = ora('Loading calendar...').start();
-      try {
-        const result = await client.get('/calendar') as any;
-        spinner.stop();
-        const events = result?.events || result?.items || [];
-        if (!events.length) { console.log(chalk.dim('  No upcoming events.')); return; }
-        console.log();
-        for (const ev of events.slice(0, 20)) {
-          const start = ev.start || ev.start_time || '';
-          const title = ev.title || ev.summary || ev.name || '';
-          console.log(`  ${chalk.cyan(start.slice(0, 16))}  ${chalk.bold(title)}`);
-        }
-        console.log();
-      } catch (e: any) { spinner.stop(); console.log(chalk.red(`  Error: ${e.message}`)); }
+      const result = await invokeMcpTool(client, 'calendar_list_events', {});
+      spinner.stop();
+      if (result?.error) { console.log(chalk.red(`  Error: ${result.error}`)); return; }
+      const events = Array.isArray(result) ? result : (result?.events || result?.items || []);
+      if (!events.length) { console.log(chalk.dim('  No upcoming events.')); return; }
+      console.log();
+      for (const ev of events.slice(0, 20)) {
+        const start = String(ev.start_time || ev.start || '');
+        const title = ev.title || ev.summary || ev.name || '';
+        console.log(`  ${chalk.cyan(start.slice(0, 16))}  ${chalk.bold(title)}  ${chalk.dim(String(ev.id || '').slice(0, 8))}`);
+      }
+      console.log();
     } else if (sub === 'create') {
       const title = parsed[1];
       if (!title) { console.log(chalk.dim('  Usage: /calendar create "<title>" --start <ISO> [--end <ISO>]')); return; }
@@ -7509,31 +7290,31 @@ COMMANDS['calendar'] = {
       const startMatch = flagStr.match(/--start\s+(\S+)/);
       const endMatch = flagStr.match(/--end\s+(\S+)/);
       if (!startMatch) { console.log(chalk.red('  --start <ISO datetime> required.')); return; }
+      const startMs = Date.parse(startMatch[1]);
+      if (Number.isNaN(startMs)) { console.log(chalk.red(`  --start is not a valid ISO datetime: ${startMatch[1]}`)); return; }
+      // calendar_create_event requires end_time; default to a one-hour event.
+      const endTime = endMatch ? endMatch[1] : new Date(startMs + 3600_000).toISOString();
       const spinner = ora('Creating event...').start();
-      try {
-        const body: any = { title, start: startMatch[1] };
-        if (endMatch) body.end = endMatch[1];
-        const result = await client.post('/calendar', body) as any;
-        spinner.stop();
-        console.log(chalk.green(`  Event created: ${result?.id || result?.event_id || 'OK'}`));
-      } catch (e: any) { spinner.stop(); console.log(chalk.red(`  Error: ${e.message}`)); }
+      const result = await invokeMcpTool(client, 'calendar_create_event', { title, start_time: startMatch[1], end_time: endTime });
+      spinner.stop();
+      if (result?.error) { console.log(chalk.red(`  Error: ${result.error}`)); return; }
+      console.log(chalk.green(`  Event created: ${result?.id || result?.event_id || result?.event?.id || 'OK'}`));
     } else if (sub === 'delete' && parsed[1]) {
       const spinner = ora('Deleting event...').start();
-      try {
-        const result = await client.delete(`/calendar/${parsed[1]}`) as any;
-        spinner.stop();
-        if (result?.error) { console.log(chalk.red(`  Error: ${result.error}`)); }
-        else { console.log(chalk.green(`  Event ${parsed[1]} deleted.`)); }
-      } catch (e: any) { spinner.stop(); console.log(chalk.red(`  Error: ${e.message}`)); }
+      const result = await invokeMcpTool(client, 'calendar_delete_event', { event_id: parsed[1] });
+      spinner.stop();
+      if (result?.error) { console.log(chalk.red(`  Error: ${result.error}`)); }
+      else { console.log(chalk.green(`  Event ${parsed[1]} deleted.`)); }
     } else if (sub === 'sync') {
-      const spinner = ora('Syncing calendar (CalDAV)...').start();
-      try {
-        const result = await client.get('/calendar/sync') as any;
-        spinner.stop();
-        console.log(chalk.green(`  Synced: ${result?.synced || result?.count || 0} events updated.`));
-      } catch (e: any) { spinner.stop(); console.log(chalk.red(`  Error: ${e.message}`)); }
+      const spinner = ora('Syncing external calendars...').start();
+      const params: Record<string, any> = {};
+      if (parsed[1]) params.provider = parsed[1];
+      const result = await invokeMcpTool(client, 'calendar_sync_external', params);
+      spinner.stop();
+      if (result?.error) { console.log(chalk.red(`  Error: ${result.error}`)); return; }
+      console.log(chalk.green(`  Synced: ${result?.synced ?? result?.count ?? 0} events updated.`));
     } else {
-      console.log(chalk.dim('  Usage: /calendar [list|create "<title>" --start <ISO> [--end <ISO>]|delete <id>|sync]'));
+      console.log(chalk.dim('  Usage: /calendar [list|create "<title>" --start <ISO> [--end <ISO>]|delete <id>|sync [provider]]'));
     }
   },
 };
@@ -8987,8 +8768,81 @@ COMMANDS['bug'] = COMMANDS['report-bug'];
 COMMANDS['draw'] = COMMANDS['imagine'];
 COMMANDS['gen'] = COMMANDS['imagine'];
 
+// ═══════════════════════════════════════════════════════════════════════════
+// COMMAND — talk to the awdesk Command agent (POST /command, poll /command/history)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/** Send `text` to the desk Command agent and wait (bounded) for its reply.
+ *  Exported for the test; the wait is AWSH_DESK_COMMAND_WAIT_S seconds (default 60). */
+export async function runDeskCommand(
+  text: string,
+  opts: { waitMs?: number; pollMs?: number; log?: (line: string) => void } = {},
+): Promise<{ id: string; reply?: string }> {
+  const log = opts.log ?? ((line: string) => console.log(line));
+  const envWait = Number(process.env.AWSH_DESK_COMMAND_WAIT_S);
+  const waitMs = opts.waitMs ?? (Number.isFinite(envWait) && envWait >= 0 ? envWait * 1000 : 60_000);
+  const pollMs = opts.pollMs ?? 1500;
+  const id = await deskCommand(text);
+  log(chalk.dim(`  sent to the desk Command agent (id ${id})`));
+  const deadline = Date.now() + waitMs;
+  for (;;) {
+    const items = await deskCommandHistory(20);
+    const mine = items.find((it) => it.id === id);
+    if (mine?.reply) {
+      log(`  ${mine.reply}`);
+      return { id, reply: mine.reply };
+    }
+    if (Date.now() >= deadline) break;
+    await new Promise((r) => setTimeout(r, pollMs));
+  }
+  log(chalk.yellow(`  no reply yet — check later with /command history`));
+  return { id };
+}
+
+COMMANDS['command'] = {
+  description: 'Send text to the awdesk Command agent and print its reply',
+  usage: '/command <text>  |  /command history [n]   (alias /do)',
+  handler: async (_client: GenesisClient, args: string) => {
+    const text = args.trim();
+    if (!text) {
+      console.log(chalk.dim('  Usage: /command <text>  |  /command history [n]'));
+      return;
+    }
+    const hist = text.match(/^history(?:\s+(\d+))?$/i);
+    try {
+      if (hist) {
+        const items = await deskCommandHistory(hist[1] ? Number(hist[1]) : 10);
+        if (!items.length) { console.log(chalk.dim('  (no desk commands yet)')); return; }
+        for (const it of items) {
+          console.log(`  ${chalk.dim(it.at || '')} ${chalk.cyan(it.text)}`);
+          if (it.reply) console.log(`    ${it.reply}`);
+        }
+        return;
+      }
+      await runDeskCommand(text);
+    } catch (err: any) {
+      console.log(chalk.red(`  ${err?.message || err}`));
+      console.log(chalk.dim('  Is awdesk running? /desk start'));
+    }
+  },
+};
+COMMANDS['do'] = COMMANDS['command'];
+
 export function getCommand(name: string): Command | undefined {
-  return COMMANDS[name.toLowerCase()];
+  const lower = name.toLowerCase();
+  const own = (k: string) => Object.prototype.hasOwnProperty.call(COMMANDS, k);
+  if (own(lower)) return COMMANDS[lower];
+  // Aliases are declared once, in commands.json, and loaded into the
+  // registry's alias map. Resolve the alias to its canonical name and
+  // dispatch that command's handler. Own-property checks keep
+  // Object.prototype members (constructor, toString, ...) from resolving.
+  try {
+    const canonical = getCommandRegistry().resolve(lower)?.name;
+    if (canonical && canonical !== lower && own(canonical)) return COMMANDS[canonical];
+  } catch {
+    // registry unavailable -> behave as before (unknown command)
+  }
+  return undefined;
 }
 
 export function getCommandNames(): string[] {

@@ -268,7 +268,7 @@
     {
       "name": "storage",
       "category": "core",
-      "description": "Storage inventory: nodes, drives, diff, proposals, ledger, policy",
+      "description": "Storage: nodes, inventory, diff, proposals, ledger, policy, find, dupes, tree, share",
       "aliases": []
     },
     {

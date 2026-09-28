@@ -7160,8 +7160,8 @@ COMMANDS['compute'] = {
 // this builtin only tokenizes the REPL's raw string the same way every other
 // multi-word builtin here does, via parseQuotedArgs.
 COMMANDS['storage'] = {
-  description: 'Storage inventory: nodes, drives, diff, proposals, ledger, policy',
-  usage: '/storage <nodes|inventory|diff|proposals|ledger|policy|scan> [args]',
+  description: 'Storage: nodes, inventory, diff, proposals, ledger, policy, find, dupes, tree, share',
+  usage: '/storage <nodes|inventory|diff|proposals|ledger|policy|scan|find|dupes|tree|share|shares> [args]',
   handler: async (client: GenesisClient, args: string) => {
     const { runStorageCommand } = await import('./storage-command.js');
     await runStorageCommand(parseQuotedArgs(args.trim()), client);

@@ -11,9 +11,10 @@
  * security-review-patterns.md #5 — an always-empty read reads as a working,
  * inert feature unless the failure is surfaced).
  *
- * There is deliberately no write/apply/approve function here. The router
- * exposes no approve or apply route (a human answers a decision card through
+ * There is deliberately no apply/approve function here. The router exposes no
+ * approve or apply route (a human answers a decision card through
  * `/api/decisions`, never through this CLI) and this client does not invent one.
+ * The one write, shareStoragePath(), only CREATES a proposal.
  */
 
 import type { GenesisClient } from './client.js';
@@ -147,6 +148,127 @@ export async function getStorageLedger(client: GenesisClient, opts: LedgerOpts =
 
 export async function getStoragePolicy(client: GenesisClient): Promise<StorageResult> {
   return get(client, '/api/v1/storage/policy');
+}
+
+/* ── Disk index: files search / dupes / tree / share ──────────────────────
+ * The contract (the disk index contract: routers/storage.py + routers/storage_share.py):
+ *   GET  /api/v1/storage/files/search?q=&node=&ext=&min_size=&newer_days=&limit=&cursor=
+ *   GET  /api/v1/storage/files/dupes?node=&min_size=&limit=
+ *   GET  /api/v1/storage/files/tree?node=&path=&depth=
+ *   POST /api/v1/storage/share {node,path,seal?} -> a proposal id (card-gated for
+ *        platform disks), GET /api/v1/storage/shares
+ * The server derives which nodes the caller may see from the authenticated
+ * caller; `node` here is only a filter, never an authorization claim.
+ */
+
+export interface FileHit {
+  node: string;
+  path: string;
+  size: number;
+  mtime?: number | string | null;
+  ext?: string | null;
+  mime?: string | null;
+  sha256?: string | null;
+}
+
+export interface FilesSearchOpts {
+  q: string;
+  node?: string;
+  ext?: string;
+  minSize?: number;
+  newerDays?: number;
+  limit?: number;
+  cursor?: string;
+}
+
+export async function searchStorageFiles(
+  client: GenesisClient,
+  opts: FilesSearchOpts,
+): Promise<StorageResult<{ items: FileHit[]; next_cursor?: string | null }>> {
+  return get(
+    client,
+    `/api/v1/storage/files/search${qs({
+      q: opts.q,
+      node: opts.node,
+      ext: opts.ext,
+      min_size: opts.minSize,
+      newer_days: opts.newerDays,
+      limit: opts.limit,
+      cursor: opts.cursor,
+    })}`,
+  );
+}
+
+export interface DupeGroup {
+  sha256: string;
+  size: number;
+  count: number;
+  wasted_bytes: number;
+  paths: { node: string; path: string }[];
+}
+
+export interface DupesOpts {
+  node?: string;
+  minSize?: number;
+  limit?: number;
+}
+
+export async function getStorageDupes(
+  client: GenesisClient,
+  opts: DupesOpts = {},
+): Promise<StorageResult<{ groups: DupeGroup[]; total_wasted_bytes?: number }>> {
+  return get(
+    client,
+    `/api/v1/storage/files/dupes${qs({ node: opts.node, min_size: opts.minSize, limit: opts.limit })}`,
+  );
+}
+
+export interface TreeChild {
+  name: string;
+  kind: string;
+  bytes?: number;
+  files?: number;
+  newest_mtime?: number | string | null;
+}
+
+export interface TreeOpts {
+  node?: string;
+  path?: string;
+  depth?: number;
+}
+
+export async function getStorageTree(
+  client: GenesisClient,
+  opts: TreeOpts = {},
+): Promise<StorageResult<{ path: string; children: TreeChild[] }>> {
+  return get(
+    client,
+    `/api/v1/storage/files/tree${qs({ node: opts.node, path: opts.path, depth: opts.depth })}`,
+  );
+}
+
+export interface ShareOpts {
+  node: string;
+  path: string;
+  seal?: boolean;
+}
+
+/**
+ * Ask Genesis to share a path. This does NOT publish anything by itself: the
+ * server answers with a proposal id, and for a platform disk that proposal
+ * raises a decision card a human answers. The body carries only what the
+ * contract names — the server resolves ownership from the bearer.
+ */
+export async function shareStoragePath(client: GenesisClient, opts: ShareOpts): Promise<StorageResult> {
+  const body: Record<string, any> = { node: opts.node, path: opts.path };
+  if (opts.seal !== undefined) body.seal = opts.seal;
+  const res = await client.postDetailed('/api/v1/storage/share', body);
+  if (isErrorShape(res)) return { ok: false, error: res.error, status: res.status };
+  return { ok: true, data: res };
+}
+
+export async function getStorageShares(client: GenesisClient): Promise<StorageResult> {
+  return get(client, '/api/v1/storage/shares');
 }
 
 /* ── `--local` scan: no network, no Genesis ─────────────────────────────── */

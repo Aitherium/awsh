@@ -1001,6 +1001,13 @@ $rows | ForEach-Object { [Console]::Out.WriteLine("PATH=" + $_) }`;
   // products (Deep Research, Saga, Agent Home, Iris). Local-only (awdk licensing,
   // ~/.aither), so intercepted before backend resolution like `rc`. A bare
   // `aither install` / `install --profile …` is still the sovereign install below.
+  // `aither awconnect …` — the browser extension, delegated to `adk awconnect`.
+  // Local-only (~/.aither, the browser's profile files), so before backend resolution.
+  if (args[0] && args[0].toLowerCase() === 'awconnect') {
+    const { runAwconnectCommand } = await import('./awconnect-command.js');
+    process.exitCode = runAwconnectCommand(args.slice(1));
+    return;
+  }
   if (args[0] && ['shop', 'license'].includes(args[0].toLowerCase())) {
     const { runShopCommand, runLicenseCommand } = await import('./shop-command.js');
     process.exitCode = args[0].toLowerCase() === 'shop'

@@ -997,6 +997,25 @@ $rows | ForEach-Object { [Console]::Out.WriteLine("PATH=" + $_) }`;
     return;
   }
 
+  // `aither shop`, `aither license …` and `aither install <product>` — the desktop
+  // products (Deep Research, Saga, Agent Home, Iris). Local-only (awdk licensing,
+  // ~/.aither), so intercepted before backend resolution like `rc`. A bare
+  // `aither install` / `install --profile …` is still the sovereign install below.
+  if (args[0] && ['shop', 'license'].includes(args[0].toLowerCase())) {
+    const { runShopCommand, runLicenseCommand } = await import('./shop-command.js');
+    process.exitCode = args[0].toLowerCase() === 'shop'
+      ? runShopCommand(args.slice(1))
+      : runLicenseCommand(args.slice(1));
+    return;
+  }
+  if (args[0] && args[0].toLowerCase() === 'install') {
+    const { isProductInstall, runProductInstall } = await import('./shop-command.js');
+    if (isProductInstall(args.slice(1))) {
+      process.exitCode = await runProductInstall(args.slice(1));
+      return;
+    }
+  }
+
   const ONESHOT_CMDS = new Set(['node', 'nodes', 'install']);
   if (args[0] && ONESHOT_CMDS.has(args[0].toLowerCase())) {
     const { getCommand } = await import('./commands.js');
@@ -1540,7 +1559,7 @@ async function oneShotChat(
     } else if (msg.includes('Cannot connect') || msg.includes('ECONNREFUSED') || msg.includes('fetch failed')) {
       console.error(chalk.red(`Backend not reachable at ${config.genesisUrl}`));
       console.error(chalk.dim('Start Genesis: docker compose -f docker-compose.aitheros.yml --profile chat-minimal up -d'));
-      console.error(chalk.dim('  Or ADK:    adk serve --identity <agent>'));
+      console.error(chalk.dim('  Or ADK:    adk run --identity <agent>'));
     } else {
       console.error(chalk.red(`Error: ${msg}`));
     }

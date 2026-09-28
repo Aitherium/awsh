@@ -7,6 +7,12 @@
       "aliases": []
     },
     {
+      "name": "backups",
+      "category": "core",
+      "description": "Backups: state | verify | run | restore set_id=\u2026 target_dir=/tmp/\u2026",
+      "aliases": []
+    },
+    {
       "name": "briefs",
       "category": "shell",
       "description": "List and read executive briefs (session closing summaries)",
@@ -35,6 +41,14 @@
       "aliases": []
     },
     {
+      "name": "command",
+      "category": "core",
+      "description": "Send text to the awdesk Command agent and print its reply",
+      "aliases": [
+        "do"
+      ]
+    },
+    {
       "name": "compose",
       "category": "agents",
       "description": "Compose a new custom agent interactively",
@@ -56,14 +70,6 @@
       "description": "Control the awdesk desktop overlay (avatar, tray, decision cards)",
       "aliases": [
         "persona"
-      ]
-    },
-    {
-      "name": "command",
-      "category": "core",
-      "description": "Send text to the awdesk Command agent and print its reply",
-      "aliases": [
-        "do"
       ]
     },
     {
@@ -176,6 +182,12 @@
       "aliases": []
     },
     {
+      "name": "ops",
+      "category": "core",
+      "description": "Platform ops: aither ops <noun> <verb> [k=v] (dry run unless --apply)",
+      "aliases": []
+    },
+    {
       "name": "pool",
       "category": "core",
       "description": "LLM pool management \u2014 check status or reset stuck slots",
@@ -184,7 +196,7 @@
     {
       "name": "preview",
       "category": "core",
-      "description": "List active preview containers or open one in browser",
+      "description": "List sandbox sessions or open one in ForgeIDE preview",
       "aliases": []
     },
     {
@@ -245,6 +257,12 @@
       "name": "sessions",
       "category": "shell",
       "description": "List or inspect saved session traces",
+      "aliases": []
+    },
+    {
+      "name": "solve",
+      "category": "core",
+      "description": "Run the reasoning loop once (adk solve)",
       "aliases": []
     },
     {

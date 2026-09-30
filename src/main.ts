@@ -1033,14 +1033,6 @@ $rows | ForEach-Object { [Console]::Out.WriteLine("PATH=" + $_) }`;
       : runLicenseCommand(args.slice(1));
     return;
   }
-  // `aither launch <product>`: only a known product id is captured.
-  if (args[0] && args[0].toLowerCase() === 'launch') {
-    const { isProductLaunch, runProductLaunch } = await import('./shop-command.js');
-    if (isProductLaunch(args.slice(1))) {
-      process.exitCode = await runProductLaunch(args.slice(1));
-      return;
-    }
-  }
   if (args[0] && args[0].toLowerCase() === 'install') {
     const { isProductInstall, runProductInstall } = await import('./shop-command.js');
     if (isProductInstall(args.slice(1))) {

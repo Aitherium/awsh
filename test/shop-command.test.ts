@@ -9,6 +9,8 @@
  *  - a license that fails awdk verification is never written, and one that would
  *    DROP a pack the current license grants is refused without --force.
  *  - a hosted product opens its page; an uninstalled one opens the shop.
+ *  - Aither Hearth is found by awdk's `aither-hearth` (never only the pre-rename
+ *    names) and launches `serve --pair`; `adk` counts only when `adk home` exists.
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -16,8 +18,9 @@ import { mkdtempSync, readFileSync, writeFileSync, existsSync, readdirSync } fro
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
-  SHOP_PRODUCTS, actionFor, findProduct, isProductInstall, parseLicenseText,
-  runLicenseCommand, runProductInstall, runShopCommand, shopUrl, type ShopDeps,
+  SHOP_PRODUCTS, actionFor, findInstalled, findLaunch, findProduct, isProductInstall,
+  isProductLaunch, parseLicenseText, runLicenseCommand, runProductInstall, runProductLaunch,
+  runShopCommand, shopUrl, type ShopDeps,
 } from '../src/shop-command.js';
 
 const ENV = { payload: Buffer.from('{"tier":"pro","packs":["saga"]}').toString('base64'), signature: 'ab'.repeat(32) };
@@ -52,6 +55,73 @@ test('catalog: the four products, shop slugs under /shop/<id>', () => {
   assert.deepEqual(SHOP_PRODUCTS.map(p => p.id), ['deep-research', 'saga', 'agent-home', 'iris']);
   assert.equal(shopUrl(findProduct('saga')!), 'https://aitherium.com/shop/saga');
   assert.equal(findProduct('SAGA')?.pack, 'saga');
+});
+
+test('catalog: Aither Hearth keeps the agent-home id and the pre-rename names as fallbacks', () => {
+  const hearth = findProduct('agent-home')!;
+  assert.equal(hearth.name, 'Aither Hearth');
+  assert.equal(hearth.pack, 'agent-home');
+  assert.equal(hearth.console, true);
+  assert.deepEqual(hearth.executables, ['aither-hearth', 'agent-home', 'aither-agent-home', 'adk']);
+  const oldOnly = (n: string) => (n === 'aither-agent-home' ? '/usr/bin/aither-agent-home' : null);
+  assert.deepEqual(findLaunch(hearth, deps({ which: oldOnly, probe: () => false }).d),
+    { path: '/usr/bin/aither-agent-home', args: [] });
+});
+
+test('Hearth is found by awdk\'s aither-hearth script and launches `serve --pair`', () => {
+  const hearth = findProduct('agent-home')!;
+  const probed: string[][] = [];
+  const both = (n: string) => (({ 'aither-hearth': '/usr/bin/aither-hearth', adk: '/usr/bin/adk' } as
+    Record<string, string>)[n] || null);
+  const { d } = deps({ which: both, probe: (f, a) => { probed.push([f, ...a]); return true; } });
+  assert.deepEqual(findLaunch(hearth, d), { path: '/usr/bin/aither-hearth', args: ['serve', '--pair'] });
+  assert.deepEqual(probed, [], 'the console script needs no probe');
+  assert.equal(actionFor(hearth, findInstalled(hearth, d), null), 'launch');
+});
+
+test('adk counts as Hearth only when `adk home --help` exits 0', () => {
+  const hearth = findProduct('agent-home')!;
+  const onlyAdk = (n: string) => (n === 'adk' ? '/usr/bin/adk' : null);
+  const probed: string[][] = [];
+  const ok = deps({ which: onlyAdk, probe: (f, a) => { probed.push([f, ...a]); return true; } }).d;
+  assert.deepEqual(findLaunch(hearth, ok), { path: '/usr/bin/adk', args: ['home', 'serve', '--pair'] });
+  assert.deepEqual(probed, [['/usr/bin/adk', 'home', '--help']]);
+  assert.equal(findInstalled(hearth, deps({ which: onlyAdk, probe: () => false }).d), null,
+    'an awdk older than `adk home` is not Hearth');
+});
+
+test('aither launch agent-home runs `aither-hearth serve --pair` in this terminal', async () => {
+  const ran: string[][] = [];
+  const only = (n: string) => (n === 'aither-hearth' ? '/usr/bin/aither-hearth' : null);
+  const { d, lines, opened } = deps({ which: only, run: (f, a) => { ran.push([f, ...a]); return 0; } });
+  assert.equal(isProductLaunch(['agent-home']), true);
+  assert.equal(isProductLaunch(['--help']), false);
+  assert.equal(await runProductLaunch(['agent-home'], d), 0);
+  assert.deepEqual(ran, [['/usr/bin/aither-hearth', 'serve', '--pair']]);
+  assert.ok(lines.some(l => l.includes('Ctrl+C')));
+  assert.deepEqual(opened, []);
+  // A failed start says what to run instead of exiting silently.
+  const failed = deps({ which: only, run: () => null });
+  assert.equal(await runProductLaunch(['agent-home'], failed.d), 1);
+  assert.ok(failed.lines.some(l => l.includes('/usr/bin/aither-hearth serve --pair')));
+});
+
+test('aither launch: not installed goes to the shop; hosted opens its page', async () => {
+  const ran: string[][] = [];
+  const { d, opened } = deps({ run: (f, a) => { ran.push([f, ...a]); return 0; } });
+  assert.equal(await runProductLaunch(['agent-home'], d), 0);
+  assert.deepEqual(ran, []);
+  assert.deepEqual(opened, ['https://aitherium.com/shop/agent-home']);
+  assert.equal(await runProductLaunch(['iris'], d), 0);
+  assert.equal(opened[1], 'https://aitherium.com/iris');
+});
+
+test('aither install on an installed Hearth names the launch command', async () => {
+  const only = (n: string) => (n === 'aither-hearth' ? '/usr/bin/aither-hearth' : null);
+  const { d, lines, opened } = deps({ which: only });
+  assert.equal(await runProductInstall(['agent-home'], d), 0);
+  assert.ok(lines.some(l => l.includes('aither launch agent-home') && l.includes('serve --pair')));
+  assert.deepEqual(opened, []);
 });
 
 test('isProductInstall: only a product id takes the product branch', () => {

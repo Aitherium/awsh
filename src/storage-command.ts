@@ -15,6 +15,8 @@ import type { GenesisClient } from './client.js';
 import { COLORS } from './tui/theme.js';
 import { formatTable } from './renderer.js';
 import {
+  awstorageWhoami,
+  emptyStateLine,
   formatBytes,
   getStorageNodes,
   getStorageInventory,
@@ -104,13 +106,14 @@ ${COLORS.accent('aither storage')} — awstorage inventory control plane (nodes,
   aither storage scan --local <root>                        run the awstorage scanner HERE, no fleet needed
 
   Disk index (indexed files on the nodes you own):
-  aither storage find <query> [--node N] [--ext pdf] [--min-size BYTES] [--newer DAYS] [--limit 50] [--json]
+  aither storage find <query> [--node N] [--ext pdf] [--min-bytes BYTES] [--newer DAYS] [--limit 50] [--json]
                                                              search file paths across your indexed disks
-  aither storage dupes [--node N] [--min-size BYTES] [--limit 25] [--json]
-                                                             duplicate-content groups and the bytes they waste
+  aither storage dupes [--node N] [--min-bytes BYTES] [--limit 25] [--json]
+                                                             duplicate groups; reclaimable = actionable bytes (default >= 1 MiB)
   aither storage tree [<path>] [--node N] [--depth 1] [--json]
                                                              folder sizes under a path
-  aither storage share <path> --node N [--seal]             PROPOSE sharing a path (may raise a decision card)
+  aither storage share <path> [--node N] [--seal]           PROPOSE sharing a node path (always a decision card;
+                                                             --node defaults to awstorage whoami)
   aither storage shares [--json]                            shares you have proposed or published
 
 Reads hit Genesis's /api/v1/storage/* — there is no approve/apply subcommand: a
@@ -341,7 +344,7 @@ function fmtMtime(m: number | string | null | undefined): string {
 export function fileHitRows(items: FileHit[]): string[][] {
   return items.map((f) => [
     f.node ?? '?',
-    formatBytes(f.size),
+    formatBytes(f.bytes ?? f.size),
     fmtMtime(f.mtime),
     String(f.path ?? '?'),
   ]);
@@ -354,11 +357,12 @@ export function dupeRows(groups: DupeGroup[]): string[][] {
     .map((g) => {
       const paths = g.paths || [];
       const first = paths[0];
-      const more = paths.length > 1 ? `  (+${paths.length - 1} more)` : '';
+      const extra = (g.count ?? paths.length) - 1;
+      const more = extra > 0 ? `  (+${extra} more${g.paths_truncated ? ', truncated' : ''})` : '';
       return [
-        formatBytes(g.wasted_bytes),
+        formatBytes(g.actionable_bytes ?? 0),
         String(g.count ?? paths.length),
-        formatBytes(g.size),
+        formatBytes(g.bytes ?? g.size),
         String(g.sha256 ?? '').slice(0, 12),
         first ? `${first.node}:${first.path}${more}` : '-',
       ];
@@ -380,14 +384,14 @@ export function treeRows(children: TreeChild[]): string[][] {
 async function handleFind(client: GenesisClient, flags: StorageArgs['flags'], positional: string[]): Promise<number> {
   const q = positional.join(' ').trim() || str(flags.q);
   if (!q) {
-    console.error(COLORS.warn('  usage: aither storage find <query> [--node N] [--ext E] [--min-size B] [--newer DAYS]'));
+    console.error(COLORS.warn('  usage: aither storage find <query> [--node N] [--ext E] [--min-bytes B] [--newer DAYS]'));
     return 2;
   }
   const r = await searchStorageFiles(client, {
     q,
     node: str(flags.node),
     ext: str(flags.ext),
-    minSize: num(flags['min-size']),
+    minBytes: num(flags['min-bytes'] ?? flags['min-size']),
     newerDays: num(flags.newer),
     limit: num(flags.limit) ?? 50,
     cursor: str(flags.cursor),
@@ -400,9 +404,11 @@ async function handleFind(client: GenesisClient, flags: StorageArgs['flags'], po
   const items = r.data?.items || [];
   console.log(COLORS.accent(`\n  Files matching "${q}"  (${items.length}${r.data?.next_cursor ? '+' : ''})\n`));
   if (!items.length) {
-    console.log(COLORS.muted('  no indexed file matched (index a disk: `awstorage files scan <root>` then `files push`)\n'));
+    console.log(COLORS.muted(`  ${emptyStateLine(r.data, 'indexed file matched')}\n`));
     return 0;
   }
+  if (r.data?.stale) console.log(COLORS.warn(`  ${emptyStateLine({ stale: true }, 'recent files')}`));
+  if (r.data?.partial) console.log(COLORS.warn('  partial: more files matched than were scanned -- narrow the query'));
   console.log(formatTable(['NODE', 'SIZE', 'MODIFIED', 'PATH'], fileHitRows(items)));
   if (r.data?.next_cursor) {
     console.log(COLORS.muted(`\n  more: aither storage find ${JSON.stringify(q)} --cursor ${r.data.next_cursor}`));
@@ -414,7 +420,7 @@ async function handleFind(client: GenesisClient, flags: StorageArgs['flags'], po
 async function handleDupes(client: GenesisClient, flags: StorageArgs['flags']): Promise<number> {
   const r = await getStorageDupes(client, {
     node: str(flags.node),
-    minSize: num(flags['min-size']),
+    minBytes: num(flags['min-bytes'] ?? flags['min-size']),
     limit: num(flags.limit) ?? 25,
   });
   if (!r.ok) return printFailure(r, 'dupes');
@@ -423,16 +429,18 @@ async function handleDupes(client: GenesisClient, flags: StorageArgs['flags']): 
     return 0;
   }
   const groups = r.data?.groups || [];
+  const reclaim = groups.reduce((a, g) => a + (g.actionable_bytes ?? 0), 0);
   console.log(
     COLORS.accent(
-      `\n  Duplicate groups  (${groups.length}, ${formatBytes(r.data?.total_wasted_bytes)} reclaimable)\n`,
+      `\n  Duplicate groups  (${groups.length}, ${formatBytes(reclaim)} reclaimable, ` +
+        `${formatBytes(r.data?.total_wasted_bytes)} duplicated)\n`,
     ),
   );
   if (!groups.length) {
-    console.log(COLORS.muted('  no duplicate content found in the indexed files\n'));
+    console.log(COLORS.muted(`  ${emptyStateLine(r.data, 'duplicate content in the indexed files')}\n`));
     return 0;
   }
-  console.log(formatTable(['WASTED', 'COPIES', 'SIZE', 'SHA256', 'FIRST PATH'], dupeRows(groups)));
+  console.log(formatTable(['RECLAIMABLE', 'COPIES', 'SIZE', 'SHA256', 'FIRST PATH'], dupeRows(groups)));
   console.log(COLORS.muted('\n  reclaiming a group is a proposal + decision card (Disk Explorer or /workspace/storage)\n'));
   return 0;
 }
@@ -449,21 +457,26 @@ async function handleTree(client: GenesisClient, flags: StorageArgs['flags'], po
   const noun = children.length === 1 ? 'entry' : 'entries';
   console.log(COLORS.accent(`\n  ${r.data?.path || path || '/'}  (${children.length} ${noun})\n`));
   if (!children.length) {
-    console.log(COLORS.muted('  empty, or not indexed yet\n'));
+    console.log(COLORS.muted(`  ${emptyStateLine(r.data, 'entries in this folder')}\n`));
     return 0;
   }
   console.log(formatTable(['NAME', 'BYTES', 'FILES', 'NEWEST'], treeRows(children)));
+  if (r.data?.truncated) console.log(COLORS.warn('  more entries than shown (truncated)'));
   console.log();
   return 0;
 }
 
 async function handleShare(client: GenesisClient, flags: StorageArgs['flags'], positional: string[]): Promise<number> {
   const path = positional[0] || str(flags.path);
-  const node = str(flags.node);
+  // `awstorage whoami` order (env AWSTORAGE_NODE, ~/.aither/node-id, hostname) when
+  // --node is omitted -- never a bare hostname guess, and never an authorization claim.
+  const who = awstorageWhoami();
+  const node = str(flags.node) || who.node;
   if (!path || !node) {
-    console.error(COLORS.warn('  usage: aither storage share <path> --node <id> [--seal]'));
+    console.error(COLORS.warn('  usage: aither storage share <path> [--node <id>] [--seal]'));
     return 2;
   }
+  if (!str(flags.node)) console.log(COLORS.muted(`  node ${node} (from ${who.source}; pass --node to pick another)`));
   const r = await shareStoragePath(client, { node, path, seal: flags.seal ? true : undefined });
   if (!r.ok) return printFailure(r, 'share');
   const d = r.data || {};
@@ -474,6 +487,7 @@ async function handleShare(client: GenesisClient, flags: StorageArgs['flags'], p
   if (d.card_id || d.decision_id) {
     console.log(COLORS.muted(`  waiting on decision card ${d.card_id ?? d.decision_id} — answer it in /decisions`));
   }
+  console.log(COLORS.muted('  recipients, expiry and revoke: aitherium.com/share'));
   console.log();
   return 0;
 }

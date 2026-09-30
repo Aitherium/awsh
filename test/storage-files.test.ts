@@ -9,7 +9,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { runStorageCommand, fileHitRows, dupeRows, treeRows } from '../src/storage-command.js';
-import { shareStoragePath, searchStorageFiles } from '../src/storage-client.js';
+import { awstorageWhoami, shareStoragePath, searchStorageFiles } from '../src/storage-client.js';
 
 type Call = { method: 'GET' | 'POST'; path: string; body?: any };
 
@@ -52,7 +52,7 @@ test('find: sends q + filters to /files/search with the contract param names', a
     next_cursor: null,
   }));
   const { result, out } = await quiet(() =>
-    runStorageCommand(['find', 'invoice', '--node', 'desk', '--ext', 'pdf', '--min-size', '1024', '--newer', '7'], client),
+    runStorageCommand(['find', 'invoice', '--node', 'desk', '--ext', 'pdf', '--min-bytes', '1024', '--newer', '7'], client),
   );
   assert.equal(result, 0);
   assert.equal(calls.length, 1);
@@ -61,7 +61,7 @@ test('find: sends q + filters to /files/search with the contract param names', a
   assert.equal(url.searchParams.get('q'), 'invoice');
   assert.equal(url.searchParams.get('node'), 'desk');
   assert.equal(url.searchParams.get('ext'), 'pdf');
-  assert.equal(url.searchParams.get('min_size'), '1024');
+  assert.equal(url.searchParams.get('min_bytes'), '1024');
   assert.equal(url.searchParams.get('newer_days'), '7');
   assert.equal(url.searchParams.get('limit'), '50');
   assert.match(out, /E:\/docs\/a\.pdf/);
@@ -88,20 +88,39 @@ test('find: 403 is surfaced as not authorized', async () => {
   assert.match(err, /not authorized \(403\)/);
 });
 
-test('dupes: hits /files/dupes and prints total reclaimable', async () => {
+test('dupes: hits /files/dupes; reclaimable is ACTIONABLE bytes, not raw waste', async () => {
   const { client, calls } = fakeClient(() => ({
     groups: [
-      { sha256: 'a'.repeat(64), size: 1024, count: 3, wasted_bytes: 2048, paths: [{ node: 'desk', path: '/a' }, { node: 'desk', path: '/b' }, { node: 'desk', path: '/c' }] },
+      { sha256: 'a'.repeat(64), bytes: 1024, count: 3, wasted_bytes: 2048, actionable_bytes: 1024, paths: [{ node: 'desk', path: '/a' }, { node: 'desk', path: '/b' }, { node: 'desk', path: '/c' }] },
     ],
     total_wasted_bytes: 2048,
   }));
-  const { result, out } = await quiet(() => runStorageCommand(['dupes', '--min-size', '100'], client));
+  const { result, out } = await quiet(() => runStorageCommand(['dupes', '--min-bytes', '100'], client));
   assert.equal(result, 0);
   const url = new URL(`http://x${calls[0].path}`);
   assert.equal(url.pathname, '/api/v1/storage/files/dupes');
-  assert.equal(url.searchParams.get('min_size'), '100');
-  assert.match(out, /2\.0KB reclaimable/);
+  assert.equal(url.searchParams.get('min_bytes'), '100');
+  assert.match(out, /1\.0KB reclaimable, 2\.0KB duplicated/);
   assert.match(out, /\+2 more/);
+});
+
+test('dupes: min_bytes defaults to 1 MiB', async () => {
+  const { client, calls } = fakeClient(() => ({ groups: [] }));
+  await quiet(() => runStorageCommand(['dupes'], client));
+  assert.equal(new URL(`http://x${calls[0].path}`).searchParams.get('min_bytes'), String(1024 * 1024));
+});
+
+test('empty answers are one of three states, never a silent empty', async () => {
+  const notIndexed = fakeClient(() => ({ path: '', children: [], indexed_roots: [] }));
+  const a = await quiet(() => runStorageCommand(['tree'], notIndexed.client));
+  assert.match(a.out, /no node is indexed yet/);
+  assert.match(a.out, /awstorage files scan --all-volumes && awstorage push/);
+  const stale = fakeClient(() => ({ items: [], indexed_roots: [{ root: '/' }], stale: true }));
+  const b = await quiet(() => runStorageCommand(['find', 'x'], stale.client));
+  assert.match(b.out, /stale/);
+  const none = fakeClient(() => ({ groups: [], indexed_roots: [{ root: '/' }] }));
+  const c = await quiet(() => runStorageCommand(['dupes'], none.client));
+  assert.match(c.out, /no duplicate content/);
 });
 
 test('tree: positional path + depth go to /files/tree', async () => {
@@ -132,9 +151,34 @@ test('share: POSTs only {node,path[,seal]} and reports the proposal, never an ap
   assert.match(out, /decision card dc-9/);
 });
 
-test('share: missing --node is a usage error and sends nothing', async () => {
+test('share: missing --node uses awstorage whoami (env first), never a bare guess', async () => {
+  const prev = process.env.AWSTORAGE_NODE;
+  process.env.AWSTORAGE_NODE = 'debian-fleet';
+  try {
+    const { client, calls } = fakeClient(() => ({ proposal_id: 'p-2' }));
+    const { result, out } = await quiet(() => runStorageCommand(['share', 'E:/docs'], client));
+    assert.equal(result, 0);
+    assert.deepEqual(calls[0].body, { node: 'debian-fleet', path: 'E:/docs' });
+    assert.match(out, /env:AWSTORAGE_NODE/);
+  } finally {
+    if (prev === undefined) delete process.env.AWSTORAGE_NODE;
+    else process.env.AWSTORAGE_NODE = prev;
+  }
+});
+
+test('awstorageWhoami: env, then ~/.aither/node-id, then hostname', () => {
+  const noFile = () => { throw new Error('ENOENT'); };
+  assert.equal(awstorageWhoami({ env: { AWSTORAGE_NODE: 'e' }, readFile: noFile, home: () => '/h', host: () => 'h' }).node, 'e');
+  const f = awstorageWhoami({ env: {}, readFile: () => 'local\n', home: () => '/h', host: () => 'h' });
+  assert.equal(f.node, 'local');
+  assert.match(f.source, /^file:/);
+  assert.deepEqual(awstorageWhoami({ env: {}, readFile: () => 'bad id!', home: () => '/h', host: () => 'h' }),
+    { node: 'h', source: 'hostname' });
+});
+
+test('share: a missing path is a usage error and sends nothing', async () => {
   const { client, calls } = fakeClient(() => ({}));
-  const { result } = await quiet(() => runStorageCommand(['share', 'E:/docs'], client));
+  const { result } = await quiet(() => runStorageCommand(['share'], client));
   assert.equal(result, 2);
   assert.equal(calls.length, 0);
 });
@@ -162,10 +206,10 @@ test('shares: lists /shares', async () => {
 });
 
 test('pure row builders', () => {
-  assert.deepEqual(fileHitRows([{ node: 'n', path: '/p', size: 0 }])[0].slice(0, 2), ['n', '0B']);
+  assert.deepEqual(fileHitRows([{ node: 'n', path: '/p', bytes: 0 }])[0].slice(0, 2), ['n', '0B']);
   const d = dupeRows([
-    { sha256: 'x', size: 1, count: 2, wasted_bytes: 1, paths: [{ node: 'n', path: '/a' }, { node: 'n', path: '/b' }] },
-    { sha256: 'y', size: 1, count: 2, wasted_bytes: 5, paths: [] },
+    { sha256: 'x', bytes: 1, count: 2, wasted_bytes: 1, paths: [{ node: 'n', path: '/a' }, { node: 'n', path: '/b' }] },
+    { sha256: 'y', bytes: 1, count: 2, wasted_bytes: 5, paths: [] },
   ]);
   assert.equal(d[0][3], 'y');
   assert.equal(d[0][4], '-');

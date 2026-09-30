@@ -9,6 +9,7 @@
 import { readFileSync, writeFileSync, mkdirSync, chmodSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
+import { isLoopbackUrl, shellIsOffline } from './offline.js';
 
 // Resolved per call, never at import: loadConfig() already resolves homedir()
 // on every call, and a HOME override (tests, embedders) after import must not
@@ -133,8 +134,9 @@ export function sessionBearerToken(): string | null {
 
 const IDENTITY_PATH = '/api/me/profile';
 
-/** Candidate hosts that can resolve a bearer to a person, best first. */
-function identityBases(): string[] {
+/** Candidate hosts that can resolve a bearer to a person, best first. Offline, only
+ *  loopback hosts: the bearer never leaves the machine and nothing dials a public edge. */
+export function identityBases(offline: boolean = shellIsOffline()): string[] {
   const out: string[] = [];
   const profile = getActiveProfile();
   // "local" is a sentinel, not a URL -- resolving it produces `local/api/...`,
@@ -145,7 +147,8 @@ function identityBases(): string[] {
   if (env) out.push(env.replace(/\/$/, ''));
   out.push('http://127.0.0.1:3000');
   out.push('https://api.aitherium.com');
-  return [...new Set(out)];
+  const uniq = [...new Set(out)];
+  return offline ? uniq.filter(isLoopbackUrl) : uniq;
 }
 
 /**

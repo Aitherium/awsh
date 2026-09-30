@@ -101,7 +101,7 @@
     {
       "name": "fleet",
       "category": "ops",
-      "description": "Fleet refresh \u2014 rebuild all lib-baking Python images + safe rolling recreate",
+      "description": "Fleet sleep | wake | critical | status (fleet_verbs.py), or refresh (rebuild + rolling recreate)",
       "aliases": []
     },
     {

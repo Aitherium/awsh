@@ -347,9 +347,14 @@ export const SUBCOMMAND_DEFS: Record<string, [string, string][]> = {
   ],
   '/gaming': [
     ['status', ''],
-    ['on', ''],
-    ['off', ''],
-    ['pause', ''],
+    ['off', '(gpu sleep)'],
+    ['on', '(gpu wake)'],
+    ['pause', '(gpu sleep)'],
+  ],
+  '/gpu': [
+    ['sleep', '[--dry-run]'],
+    ['wake', '[--dry-run] [--force]'],
+    ['status', ''],
   ],
   '/lockbox': [
     ['list', ''],
@@ -365,8 +370,9 @@ export const SUBCOMMAND_DEFS: Record<string, [string, string][]> = {
   ],
   '/fleet': [
     ['status', ''],
-    ['launch', ''],
-    ['drain', '<id>'],
+    ['sleep', '[--dry-run]'],
+    ['wake', '[--dry-run]'],
+    ['critical', '[--dry-run]'],
     ['refresh', '[--build-only] [--recreate-only] [--dry-run]'],
   ],
   '/node': [

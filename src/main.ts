@@ -471,7 +471,25 @@ async function main() {
     }
   }
 
-  // ── `awsh doctor` — is the omnibox actually worth having on this machine ──
+  // ── `awsh doctor [--json]` — can this shell work here, and does it stay local ──
+  //
+  // Every OS. Verdict and exit codes match `awnix awsh doctor` (0 pass, 1 fail, 2 could
+  // not judge); a doctor that crashed is 'unknown', never a pass. The Windows omnibox
+  // measurement below moved to `awsh doctor omnibox`.
+  if (args[0] === 'doctor' && args[1] !== 'omnibox') {
+    const { runDoctor, defaultProbes, printDoctor, crashReport, DOCTOR_EXIT } = await import('./doctor.js');
+    let rep: Awaited<ReturnType<typeof runDoctor>>;
+    try {
+      rep = await runDoctor(defaultProbes());
+    } catch (err) {
+      rep = crashReport(err);
+    }
+    if (args.includes('--json')) console.log(JSON.stringify(rep, null, 2));
+    else printDoctor(rep);
+    process.exit(DOCTOR_EXIT[rep.verdict]);
+  }
+
+  // ── `awsh doctor omnibox` — is the omnibox actually worth having on this machine ──
   //
   // This exists because the claim came BEFORE the code: omnibox.ts documented a
   // budget check that nothing in production ever ran (judgeOmnibox was reachable
@@ -1015,6 +1033,14 @@ $rows | ForEach-Object { [Console]::Out.WriteLine("PATH=" + $_) }`;
       : runLicenseCommand(args.slice(1));
     return;
   }
+  // `aither launch <product>`: only a known product id is captured.
+  if (args[0] && args[0].toLowerCase() === 'launch') {
+    const { isProductLaunch, runProductLaunch } = await import('./shop-command.js');
+    if (isProductLaunch(args.slice(1))) {
+      process.exitCode = await runProductLaunch(args.slice(1));
+      return;
+    }
+  }
   if (args[0] && args[0].toLowerCase() === 'install') {
     const { isProductInstall, runProductInstall } = await import('./shop-command.js');
     if (isProductInstall(args.slice(1))) {
@@ -1094,7 +1120,15 @@ $rows | ForEach-Object { [Console]::Out.WriteLine("PATH=" + $_) }`;
 
   // Try non-interactive (flag-based) execution first
   const handled = await runOneShot(client, config);
-  if (handled) process.exit(0);
+  // A one-shot exits by DRAINING the loop, keeping a handler's process.exitCode (`aither -c
+  // "gpu wake"` refused by fleet_verbs.py must exit 1). Measured 2026-09-28 on Node 25/Windows:
+  // an explicit process.exit() here dies in libuv (`Assertion failed: !(handle->flags &
+  // UV_HANDLE_CLOSING)`, 0xC0000409) for EVERY `aither -c`, so no script ever saw an exit code.
+  // The unref'd timer only fires if a command left a live handle; it never holds the process.
+  if (handled) {
+    setTimeout(() => process.exit(), 5000).unref();
+    return;
+  }
 
   // Enable remote session sync, then resolve any --continue/--resume/--session.
   configureRemoteSync(config.genesisUrl, config.authToken);
@@ -1662,8 +1696,9 @@ ${chalk.bold('Quick actions:')}
                                   [k=v] [--apply] [--agent genesis] [--watch]
   aither claude "<task>"          Hand a task to a scoped Claude Code subagent
                                   [--allow Read,Grep] [--budget 0.25] [--timeout 300] [--goal <id>]
-  aither -c gaming                Toggle gaming mode (free VRAM for games)
-  aither -c "gaming on"           Activate gaming mode
+  aither -c "gpu sleep"           GPU sleep: park the 5090 models, lanes to the Spark (game on)
+  aither -c "gpu wake"            GPU wake: models back one at a time (game off)
+  aither -c "fleet sleep"         Fleet sleep / wake / critical / status (fleet_verbs.py)
   aither -c apps                  Show all AitherOS app statuses
   aither -c "apps install desktop"  Install AitherDesktop
   aither -c "apps start veil"    Start AitherVeil dashboard
@@ -1693,7 +1728,7 @@ ${chalk.bold('Interactive commands:')}
   /help        Show all commands       /agents      List agents
   /status      System status           /services    List services
   /forge       Dispatch to Forge       /logs        View logs
-  /gaming      Toggle gaming mode      /apps        Manage AitherOS apps
+  /gpu         GPU sleep/wake/status   /apps        Manage AitherOS apps
   /sessions    List recent sessions    /resume      Resume a session
   /model       Show/set model          /clear       Clear screen
   exit         Quit

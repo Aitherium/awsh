@@ -130,7 +130,9 @@ export class GenesisClient {
    *  most once and never against an explicit user choice. */
   private _tryCloudFailover(): boolean {
     const cfg = getActiveConfig();
-    if (!cfg || cfg.endpointPinned || cfg.autoFailover) return false;
+    // Offline (air-gapped): never fail over to a public edge mid-turn. The turn fails
+    // with the local error, which names the local backend that died.
+    if (!cfg || cfg.offline || cfg.endpointPinned || cfg.autoFailover) return false;
     let host = '';
     try { host = new URL(this.baseUrl).hostname; } catch { return false; }
     const isLocal =

@@ -15,6 +15,7 @@ import type { ShellConfig } from './config.js';
 import { getActiveConfig, DEFAULT_AGENT } from './config.js';
 import { getRemoteMcpClient } from './mcp-client.js';
 import { fleetProbeArgv, fleetRecoverPlan, fleetStateIsUp, parseFleetState } from './fleet-recover.js';
+import { fleetVerbArgs, findFleetVerbsTool, fleetVerbCommand, FleetVerbError, FLEET_VERBS_HELP } from './fleet-verbs.js';
 import { getCommandRegistry } from './command-registry.js';
 import { isAdultContentVisible, invalidateAdultGate, ADULT_TIERS } from './adult-gate.js';
 import { formatTable, getSessionArtifacts, clearSessionArtifacts, resolveImagePath, osc8Link, addSessionArtifact, type SessionArtifact } from './renderer.js';
@@ -1556,181 +1557,15 @@ const COMMANDS: Record<string, Command> = {
   },
 
   gaming: {
-    description: 'Turn AitherOS services on/off (free GPU for gaming)',
-    usage: '/gaming [on|off|status|pause]',
-    handler: async (client: GenesisClient, args: string) => {
-      const __dirname = dirname(fileURLToPath(import.meta.url));
-      const repoRoot = resolve(__dirname, '..', '..', '..', '..', '..');
-      const script = join(repoRoot, 'scripts', 'Switch-GamingMode.ps1');
-      const sub = args.trim().toLowerCase().split(/\s+/)[0] || '';
+    description: 'GPU sleep / wake / status on the awnix fleet (alias of /gpu; fleet_verbs.py)',
+    usage: '/gaming [off|stop|pause = gpu sleep | on|start|resume = gpu wake | status] [--dry-run] [--force]',
+    handler: async (_client: GenesisClient, args: string) => { runFleetVerbCommand('gpu', args); },
+  },
 
-      // ── Quick status check (no script needed) ──────────
-      if (sub === 'status') {
-        try {
-          const gpu = execSync('nvidia-smi --query-gpu=memory.used,memory.total --format=csv,noheader,nounits', {
-            encoding: 'utf-8', timeout: 5000,
-          }).trim();
-          const [used, total] = gpu.split(',').map(s => parseInt(s.trim()));
-          const free = total - used;
-          const pct = Math.round((used / total) * 100);
-          console.log();
-          console.log(chalk.bold('  GPU Status'));
-          console.log(`  Used:  ${used} MB / ${total} MB (${pct}%)`);
-          console.log(`  Free:  ${chalk[free > 20000 ? 'green' : free > 10000 ? 'yellow' : 'red'](`${free} MB`)}`);
-          try {
-            const containers = execSync('docker ps --format "{{.Names}}"', { encoding: 'utf-8', timeout: 5000 }).trim();
-            const count = containers ? containers.split('\n').length : 0;
-            console.log(`  Docker: ${count > 0 ? chalk.yellow(`${count} containers running`) : chalk.green('stopped')}`);
-          } catch {
-            console.log(`  Docker: ${chalk.green('not running')}`);
-          }
-        } catch {
-          console.log(chalk.dim('  nvidia-smi not available'));
-        }
-        console.log();
-        return;
-      }
-
-      // ── Lightweight pause (via Genesis API, keeps Docker running) ──
-      if (sub === 'light' || sub === 'lite' || sub === 'pause') {
-        const spinner = ora('Pausing GPU services via Genesis...').start();
-        const result = await client.post('/gaming-mode/on', { reason: 'aither-shell' }) as any;
-        spinner.stop();
-        if (result?.gaming_mode) {
-          console.log(chalk.green.bold('\n  🎮 GPU services paused'));
-          console.log(chalk.dim(`  vLLM containers paused — VRAM freed, Docker still running`));
-          console.log(chalk.dim(`  Use /gaming on to restore\n`));
-        } else {
-          console.log(chalk.red('  Could not reach Genesis. Use /gaming off for full shutdown.'));
-        }
-        return;
-      }
-
-      // ── Helper: detect current state ──────────────────────
-      const stateFile = join(repoRoot, '.gaming-mode-state.json');
-      const isDockerRunning = (): boolean => {
-        try {
-          const count = execSync('docker ps -q', { encoding: 'utf-8', timeout: 5000 }).trim();
-          return count.length > 0;
-        } catch {
-          return false;
-        }
-      };
-      const servicesDown = existsSync(stateFile) && !isDockerRunning();
-
-      // ── /gaming on [Full|Demo|Core] — Start services ───────
-      if (existsSync(script)) {
-        if (sub === 'on' || sub === 'start' || sub === 'resume' || sub === 'up') {
-          if (isDockerRunning()) {
-            console.log(chalk.green.bold('\n  ✅ Services are already running!\n'));
-            try {
-              const count = execSync('docker ps -q', { encoding: 'utf-8', timeout: 5000 }).trim().split('\n').length;
-              console.log(chalk.dim(`  ${count} containers active. Use /gaming status for details.\n`));
-            } catch {}
-            return;
-          }
-          const profileArg = args.trim().split(/\s+/).slice(1).join(' ').trim();
-          const resumeArgs = ['-NoProfile', '-File', script, '-Resume'];
-          if (profileArg) {
-            const validStacks = ['full', 'demo', 'core'];
-            if (validStacks.includes(profileArg.toLowerCase())) {
-              resumeArgs.push('-Stack', profileArg);
-              console.log(chalk.cyan(`\n  🚀 Starting ${profileArg} stack...\n`));
-            } else {
-              console.log(chalk.red(`\n  Unknown stack "${profileArg}". Valid options: Full, Demo, Core\n`));
-              return;
-            }
-          } else {
-            console.log(chalk.cyan('\n  🚀 Starting services...\n'));
-          }
-          const child = spawn('pwsh', resumeArgs, {
-            cwd: repoRoot, stdio: 'inherit',
-          });
-          await new Promise<void>((resolve) => child.on('close', () => resolve()));
-          return;
-        }
-
-        // ── /gaming off — Shut down for gaming ──────────────────
-        if (sub === 'off' || sub === 'stop' || sub === 'down') {
-          if (servicesDown) {
-            console.log(chalk.yellow.bold('\n  🎮 Services are already stopped!\n'));
-            console.log(`  To bring everything back online:`);
-            console.log(`    ${chalk.cyan('/gaming on')}             Start previous stack (auto-detected)`);
-            console.log(`    ${chalk.cyan('/gaming on Full')}        Start full AitherOS stack`);
-            console.log(`    ${chalk.cyan('/gaming on Demo')}        Start demo stack only`);
-            console.log(`    ${chalk.cyan('/gaming on Core')}        Start core services only`);
-            console.log();
-            return;
-          }
-
-          console.log(chalk.yellow('\n  🎮 Shutting down for gaming — releasing ALL GPU + RAM...\n'));
-          console.log(chalk.dim('  This stops Docker Desktop, WSL, and frees GPU completely.'));
-          console.log(chalk.dim('  Bring back with: /gaming on\n'));
-          const child = spawn('pwsh', ['-NoProfile', '-File', script, '-SkipCompact'], {
-            cwd: repoRoot, stdio: 'inherit',
-          });
-          await new Promise<void>((resolve) => child.on('close', () => resolve()));
-          return;
-        }
-
-        // ── /gaming (no args) — smart toggle ─────────────────
-        if (sub === '') {
-          if (servicesDown) {
-            console.log(chalk.yellow.bold('\n  🎮 Services are currently stopped.\n'));
-            console.log(`  ${chalk.cyan('/gaming on')}             Start previous stack (auto-detected)`);
-            console.log(`  ${chalk.cyan('/gaming on Full')}        Start full AitherOS stack`);
-            console.log(`  ${chalk.cyan('/gaming on Demo')}        Start demo stack only`);
-            console.log(`  ${chalk.cyan('/gaming on Core')}        Start core services only`);
-            console.log();
-            console.log(`  ${chalk.cyan('/gaming status')}         Check GPU + Docker status`);
-            console.log();
-          } else if (isDockerRunning()) {
-            console.log(chalk.green.bold('\n  ✅ Services are running.\n'));
-            try {
-              const count = execSync('docker ps -q', { encoding: 'utf-8', timeout: 5000 }).trim().split('\n').length;
-              console.log(chalk.dim(`  ${count} containers active.\n`));
-            } catch {}
-            console.log(`  ${chalk.cyan('/gaming off')}            Shut down everything for gaming`);
-            console.log(`  ${chalk.cyan('/gaming pause')}          Pause GPU services only (keep Docker)`);
-            console.log(`  ${chalk.cyan('/gaming status')}         Show GPU + Docker details`);
-            console.log();
-          } else {
-            // Docker not running, no state file
-            console.log(chalk.yellow('\n  Services appear to be stopped.\n'));
-            console.log(`  ${chalk.cyan('/gaming on')}             Start full stack`);
-            console.log(`  ${chalk.cyan('/gaming on Demo')}        Start demo stack`);
-            console.log();
-          }
-          return;
-        }
-      } else if (sub === 'off' || sub === 'stop' || sub === '') {
-        // Fallback to Genesis API if script not found
-        const spinner = ora('Stopping GPU services via Genesis...').start();
-        const result = await client.post('/gaming-mode/on', { reason: 'aither-shell' }) as any;
-        spinner.stop();
-        if (result?.gaming_mode) {
-          console.log(chalk.green.bold('\n  🎮 Gaming Mode: ON (via Genesis)'));
-          console.log(chalk.dim(`  For full GPU release, run: pwsh -File ./scripts/Switch-GamingMode.ps1\n`));
-        }
-        return;
-      }
-
-      // Help
-      console.log(chalk.bold('\n  /gaming — Manage AitherOS services\n'));
-      console.log(chalk.dim('  Start services:'));
-      console.log(`  ${chalk.cyan('/gaming on')}             Start previous stack (auto-detected)`);
-      console.log(`  ${chalk.cyan('/gaming on Full')}        Start full AitherOS stack`);
-      console.log(`  ${chalk.cyan('/gaming on Demo')}        Start demo stack only`);
-      console.log(`  ${chalk.cyan('/gaming on Core')}        Start core services only`);
-      console.log();
-      console.log(chalk.dim('  Stop services:'));
-      console.log(`  ${chalk.cyan('/gaming off')}            Full shutdown (Docker + WSL + GPU freed)`);
-      console.log(`  ${chalk.cyan('/gaming pause')}          Pause GPU only (keep Docker running)`);
-      console.log();
-      console.log(chalk.dim('  Info:'));
-      console.log(`  ${chalk.cyan('/gaming status')}         Show GPU + Docker status`);
-      console.log();
-    },
+  gpu: {
+    description: 'GPU sleep | wake | status -- the owner\'s verbs (fleet_verbs.py; same as awdesk, adk, awnode)',
+    usage: '/gpu sleep|wake|status [--dry-run] [--force]',
+    handler: async (_client: GenesisClient, args: string) => { runFleetVerbCommand('gpu', args); },
   },
 
   // ── Safety Management ─────────────────────────────────────────────────
@@ -5088,6 +4923,51 @@ const COMMANDS: Record<string, Command> = {
 
 };
 
+
+/** /gpu, /gaming and /fleet (non-refresh): spawn fleet_verbs.py with the owner's verb, stream it. */
+export function runFleetVerbCommand(noun: 'gpu' | 'fleet', args: string): number {
+  const rc = runFleetVerb(noun, args);
+  // `aither -c "gpu wake"` must exit with the verb's code: a refusal (GPU access blocked, a
+  // running game, the maintenance lock) is 1, could-not-judge is 2, and a script or hook
+  // chaining on the CLI must see that. Handlers return void, so the code rides on exitCode.
+  if (rc !== 0) process.exitCode = rc;
+  return rc;
+}
+
+function runFleetVerb(noun: 'gpu' | 'fleet', args: string): number {
+  if (/^\s*help\b/i.test(args)) {
+    console.log(chalk.bold(`\n  /${noun} -- the owner's fleet verbs\n`));
+    console.log(FLEET_VERBS_HELP + '\n');
+    return 0;
+  }
+  let verbArgs: string[] | null;
+  try {
+    verbArgs = fleetVerbArgs(noun, args);
+  } catch (e) {
+    if (e instanceof FleetVerbError) {
+      console.log(chalk.yellow(`  ${e.message}`));
+      console.log(FLEET_VERBS_HELP);
+      return 2;
+    }
+    throw e;
+  }
+  if (!verbArgs) return 0;
+  const here = dirname(fileURLToPath(import.meta.url));
+  const repoRoot = resolve(here, '..', '..', '..', '..');
+  const tool = findFleetVerbsTool(process.env, repoRoot);
+  if (!tool) {
+    console.log(chalk.red('  fleet_verbs.py not found: set AITHEROS_ROOT to the AitherOS checkout'));
+    return 2;
+  }
+  const cmd = fleetVerbCommand(tool, verbArgs);
+  const r = spawnSync(cmd.file, cmd.args, { stdio: 'inherit', windowsHide: true });
+  const rc = r.status ?? 2;
+  if (r.error) console.log(chalk.red(`  could not start ${cmd.file}: ${r.error.message} (set AITHER_PYTHON)`));
+  else if (rc === 2) console.log(chalk.yellow('  could not judge (exit 2): the fleet host did not answer'));
+  else if (rc !== 0) console.log(chalk.red(`  exit ${rc}`));
+  return rc;
+}
+
 // ── /sessions command ──
 COMMANDS['resume'] = {
   description: 'Reopen the coding sessions you had open, on a backend you choose',
@@ -6789,9 +6669,13 @@ COMMANDS['pool'] = {
 // FLEET — rebuild every lib-baking Python image + safe rolling recreate onto current code
 // ═══════════════════════════════════════════════════════════════════════════
 COMMANDS['fleet'] = {
-  description: 'Fleet refresh — rebuild all lib-baking Python images + safe rolling recreate',
-  usage: '/fleet refresh [--build-only|--recreate-only|--dry-run]',
+  description: 'Fleet sleep | wake | critical | status (fleet_verbs.py), or refresh (rebuild + rolling recreate)',
+  usage: '/fleet sleep|wake|critical|status [--dry-run] | /fleet refresh [--build-only|--recreate-only|--dry-run]',
   handler: async (_client: GenesisClient, args: string, _config: ShellConfig) => {
+    if ((args.trim().split(/\s+/)[0] || 'status').toLowerCase() !== 'refresh') {
+      runFleetVerbCommand('fleet', args);
+      return;
+    }
     const __dirname = dirname(fileURLToPath(import.meta.url));
     const repoRoot = resolve(__dirname, '..', '..', '..', '..', '..');
     const script = join(repoRoot, '.DEPLOYMENT', 'scripts', 'fleet-refresh.sh');

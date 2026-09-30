@@ -56,8 +56,10 @@ export function daemonStartCandidates(opts: {
 }
 
 export interface ResolvedBackend {
-  /** Which rung of the chain we landed on. */
-  chosen: 'pinned' | 'adk' | 'local' | 'cloud';
+  /** Which rung of the chain we landed on. 'local-llm' = offline, raw inference against
+   *  the machine's own model server; 'offline' = offline and nothing local answered (the
+   *  cloud rung was refused, never tried). */
+  chosen: 'pinned' | 'adk' | 'local' | 'local-llm' | 'offline' | 'cloud';
   /** The API base URL now in config. */
   url: string;
   /** True if we moved OFF the default local endpoint onto the cloud fallback. */
@@ -67,6 +69,20 @@ export interface ResolvedBackend {
 }
 
 const strip = (u: string) => u.replace(/\/+$/, '');
+
+/** The awnix user unit for the local agent daemon (see awnix-awsh(8)). */
+const AWSH_AGENT_UNIT = '/usr/lib/systemd/user/awsh-agent.service';
+
+/** Does an OpenAI-compatible server at `llmUrl` (…/v1) list at least one model? */
+export async function probeModels(llmUrl: string, timeoutMs = 2500): Promise<string | null> {
+  try {
+    const r = await fetch(`${strip(llmUrl)}/models`, { signal: AbortSignal.timeout(timeoutMs) });
+    if (!r.ok) return null;
+    const body = await r.json() as { data?: { id?: string }[] };
+    const id = Array.isArray(body?.data) && body.data.length > 0 ? body.data[0]?.id : undefined;
+    return id ? String(id) : null;
+  } catch { return null; }
+}
 
 /** Does this URL name a process on THIS box? config.ts keeps a private copy of this; a pin
  *  is only overridable when it is loopback, so the test has to live on this side too. */
@@ -149,6 +165,18 @@ function adkStartScript(): { script: string; hidden: boolean } | null {
  *  just means we fall through to the existing genesis/cloud resolution. */
 function tryStartAdkDaemon(): boolean {
   if (process.env.AITHERSHELL_AUTOSTART_ADK === '0') return false;
+  // A machine image (awnix) ships the agent as a systemd USER unit. Ask systemd, so the
+  // daemon runs with the unit's env (offline, loopback, the image's model url) rather
+  // than whatever this shell happens to have.
+  if (process.platform === 'linux' && existsSync(AWSH_AGENT_UNIT)) {
+    try {
+      spawn('systemctl', ['--user', 'start', '--no-block', 'awsh-agent.service'], {
+        detached: true,
+        stdio: 'ignore',
+      }).unref();
+      return true;
+    } catch { return false; }
+  }
   try {
     const found = adkStartScript();
     if (!found) return false;
@@ -194,6 +222,15 @@ export async function resolveBackend(config: ShellConfig): Promise<ResolvedBacke
   // ECONNREFUSED with one line naming a port and nothing about the backends it never tried.
   // One line in a config file silently disabled the entire never-dead guarantee. So a dead
   // loopback pin falls through to the rest of the ladder, out loud.
+  // Offline, a REMOTE pin is refused before it is probed: the user's own api_url does not
+  // outrank `offline: true`, and the pin is cleared so client.ts failover cannot use it.
+  if (config.endpointPinned && config.offline && !isLoopbackUrl(config.genesisUrl)) {
+    process.stderr.write(
+      `  ! offline: pinned api_url ${config.genesisUrl} is not loopback - not dialed\n`,
+    );
+    config.endpointPinned = false;
+    config.genesisUrl = 'http://127.0.0.1:8001';
+  }
   if (config.endpointPinned) {
     const reachable = await probeHealth(`${strip(config.genesisUrl)}/health`, 3000);
     if (reachable || !isLoopbackUrl(config.genesisUrl)) {
@@ -251,13 +288,15 @@ export async function resolveBackend(config: ShellConfig): Promise<ResolvedBacke
     }
     // Say so, rather than silently landing on a slower backend -- and remember it, so a
     // cloud 401 a moment later names the booting daemon instead of demanding a sign-in.
+    // Only when something WAS launched: with autostart off (or no start script) the
+    // "still starting" line described a daemon that nobody started.
     if (launched) {
       config.localDaemonBooting = { url: adkUrl, since };
       noteLocalDaemonBooting({ url: adkUrl, since });
+      process.stderr.write(
+        '  ⧗ local agent daemon is still starting in the background — retry in a moment, or it will serve the next launch\n',
+      );
     }
-    process.stderr.write(
-      '  ⧗ local agent daemon is still starting in the background — retry in a moment, or it will serve the next launch\n',
-    );
   }
 
   // 3. Try local Genesis.
@@ -267,7 +306,31 @@ export async function resolveBackend(config: ShellConfig): Promise<ResolvedBacke
     return { chosen: 'local', url: localUrl, switched: false, reachable: true };
   }
 
-  // 4. Local is down → fail over to the cloud gateway.
+  // 4. Offline: the cloud rung is REFUSED, not tried. Last local chance is the machine's
+  //    own model server (raw /v1 inference, no agent loop); then say plainly that
+  //    nothing local answered. An air-gapped box never dials a public edge.
+  if (config.offline) {
+    const llm = strip(config.llmUrl || '');
+    if (llm && isLoopbackUrl(llm)) {
+      const model = await probeModels(llm);
+      if (model) {
+        config.inferenceMode = 'raw';
+        config.backendType = 'adk';
+        config.backendName = 'local model';
+        if (!config.model) config.model = model;
+        return { chosen: 'local-llm', url: llm, switched: false, reachable: true };
+      }
+    }
+    applyCloudFallback(config, CLOUD_URL); // records the refusal; changes nothing else
+    process.stderr.write(
+      '  ! offline: no local backend answered (agent :9001, genesis, model server). ' +
+      'The cloud gateway is disabled offline.\n' +
+      '    Check the machine with `awsh doctor` (awnix: `awnix awsh doctor`).\n',
+    );
+    return { chosen: 'offline', url: config.genesisUrl, switched: false, reachable: false };
+  }
+
+  // 5. Local is down → fail over to the cloud gateway.
   applyCloudFallback(config, CLOUD_URL);
   const reachable = await probeHealth(`${strip(CLOUD_URL)}/health`, 4000);
   return { chosen: 'cloud', url: CLOUD_URL, switched: true, reachable };

@@ -19,6 +19,54 @@
 
 import type { GenesisClient } from './client.js';
 import { spawn } from 'node:child_process';
+import { readFileSync } from 'node:fs';
+import { homedir, hostname } from 'node:os';
+import { join } from 'node:path';
+
+/** Default duplicate floor on every surface (contract A5): 1 MiB. */
+export const DEFAULT_MIN_BYTES = 1024 * 1024;
+/** The first-run command the "not indexed" state shows (A5). */
+export const FIRST_RUN_COMMAND = 'awstorage files scan --all-volumes && awstorage push';
+const NODE_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
+
+/**
+ * The node id this machine speaks for, in `awstorage whoami` order: env
+ * AWSTORAGE_NODE, then ~/.aither/node-id, then the hostname. Never throws.
+ */
+export function awstorageWhoami(deps: {
+  env?: Record<string, string | undefined>;
+  readFile?: (p: string) => string;
+  home?: () => string;
+  host?: () => string;
+} = {}): { node: string; source: string } {
+  const env = deps.env ?? process.env;
+  const fromEnv = String(env.AWSTORAGE_NODE ?? '').trim();
+  if (fromEnv) return { node: fromEnv, source: 'env:AWSTORAGE_NODE' };
+  const file = join((deps.home ?? homedir)(), '.aither', 'node-id');
+  try {
+    const text = String((deps.readFile ?? ((p: string) => readFileSync(p, 'utf8')))(file)).trim();
+    if (NODE_ID_RE.test(text)) return { node: text, source: `file:${file}` };
+  } catch {
+    /* no node-id file: fall through to the hostname */
+  }
+  return { node: (deps.host ?? hostname)(), source: 'hostname' };
+}
+
+/** Index state every search/dupes/tree answer carries (A5). */
+export interface IndexState {
+  indexed_roots?: { root: string }[];
+  stale?: boolean;
+}
+
+/** Which of the three distinct empty states an EMPTY answer is. A server that does
+ *  not report index state reads as "no match", never "not indexed". */
+export function emptyStateLine(data: IndexState | null | undefined, what: string): string {
+  if (data && Array.isArray(data.indexed_roots) && data.indexed_roots.length === 0) {
+    return `no node is indexed yet -- run \`${FIRST_RUN_COMMAND}\` on the machine`;
+  }
+  if (data && data.stale) return `the index is stale -- ${what} may be missing; re-run \`${FIRST_RUN_COMMAND}\``;
+  return `no ${what}`;
+}
 
 export interface StorageResult<T = any> {
   ok: boolean;
@@ -152,11 +200,12 @@ export async function getStoragePolicy(client: GenesisClient): Promise<StorageRe
 
 /* ── Disk index: files search / dupes / tree / share ──────────────────────
  * The contract (the disk index contract: routers/storage.py + routers/storage_share.py):
- *   GET  /api/v1/storage/files/search?q=&node=&ext=&min_size=&newer_days=&limit=&cursor=
- *   GET  /api/v1/storage/files/dupes?node=&min_size=&limit=
+ *   GET  /api/v1/storage/files/search?q=&node=&ext=&min_bytes=&newer_days=&limit=&cursor=
+ *   GET  /api/v1/storage/files/dupes?node=&min_bytes=&limit=   (min_bytes default 1 MiB)
  *   GET  /api/v1/storage/files/tree?node=&path=&depth=
- *   POST /api/v1/storage/share {node,path,seal?} -> a proposal id (card-gated for
- *        platform disks), GET /api/v1/storage/shares
+ *   GET  /api/v1/storage/files/nodes, GET /api/v1/storage/files/proposals?node=
+ *   POST /api/v1/storage/share {node,path,seal?} -> a card-gated proposal (platform
+ *        nodes only until card recipients land), GET /api/v1/storage/shares
  * The server derives which nodes the caller may see from the authenticated
  * caller; `node` here is only a filter, never an authorization claim.
  */
@@ -164,7 +213,9 @@ export async function getStoragePolicy(client: GenesisClient): Promise<StorageRe
 export interface FileHit {
   node: string;
   path: string;
-  size: number;
+  bytes: number;
+  /** Pre-A5 servers sent `size`. */
+  size?: number;
   mtime?: number | string | null;
   ext?: string | null;
   mime?: string | null;
@@ -175,7 +226,7 @@ export interface FilesSearchOpts {
   q: string;
   node?: string;
   ext?: string;
-  minSize?: number;
+  minBytes?: number;
   newerDays?: number;
   limit?: number;
   cursor?: string;
@@ -184,14 +235,14 @@ export interface FilesSearchOpts {
 export async function searchStorageFiles(
   client: GenesisClient,
   opts: FilesSearchOpts,
-): Promise<StorageResult<{ items: FileHit[]; next_cursor?: string | null }>> {
+): Promise<StorageResult<IndexState & { items: FileHit[]; next_cursor?: string | null; partial?: boolean }>> {
   return get(
     client,
     `/api/v1/storage/files/search${qs({
       q: opts.q,
       node: opts.node,
       ext: opts.ext,
-      min_size: opts.minSize,
+      min_bytes: opts.minBytes,
       newer_days: opts.newerDays,
       limit: opts.limit,
       cursor: opts.cursor,
@@ -201,26 +252,44 @@ export async function searchStorageFiles(
 
 export interface DupeGroup {
   sha256: string;
-  size: number;
+  bytes: number;
+  /** Pre-A5 servers sent `size`. */
+  size?: number;
   count: number;
   wasted_bytes: number;
+  /** What a proposal could actually reclaim -- the reclaimable figure (A5). */
+  actionable_bytes?: number;
   paths: { node: string; path: string }[];
+  paths_truncated?: boolean;
 }
 
 export interface DupesOpts {
   node?: string;
-  minSize?: number;
+  minBytes?: number;
   limit?: number;
 }
 
 export async function getStorageDupes(
   client: GenesisClient,
   opts: DupesOpts = {},
-): Promise<StorageResult<{ groups: DupeGroup[]; total_wasted_bytes?: number }>> {
+): Promise<StorageResult<IndexState & { groups: DupeGroup[]; total_wasted_bytes?: number; next_cursor?: string | null }>> {
   return get(
     client,
-    `/api/v1/storage/files/dupes${qs({ node: opts.node, min_size: opts.minSize, limit: opts.limit })}`,
+    `/api/v1/storage/files/dupes${qs({ node: opts.node, min_bytes: opts.minBytes ?? DEFAULT_MIN_BYTES, limit: opts.limit })}`,
   );
+}
+
+/** The caller's indexed nodes (A2) -- pick one of these, never guess. */
+export async function getStorageFileNodes(client: GenesisClient): Promise<StorageResult> {
+  return get(client, '/api/v1/storage/files/nodes');
+}
+
+/** Manage proposals, scope-filtered by Genesis (A7). */
+export async function getStorageManageProposals(
+  client: GenesisClient,
+  opts: { node?: string; limit?: number } = {},
+): Promise<StorageResult> {
+  return get(client, `/api/v1/storage/files/proposals${qs({ node: opts.node, limit: opts.limit })}`);
 }
 
 export interface TreeChild {
@@ -240,7 +309,7 @@ export interface TreeOpts {
 export async function getStorageTree(
   client: GenesisClient,
   opts: TreeOpts = {},
-): Promise<StorageResult<{ path: string; children: TreeChild[] }>> {
+): Promise<StorageResult<IndexState & { path: string; children: TreeChild[]; truncated?: boolean; next_cursor?: string | null }>> {
   return get(
     client,
     `/api/v1/storage/files/tree${qs({ node: opts.node, path: opts.path, depth: opts.depth })}`,
@@ -254,10 +323,11 @@ export interface ShareOpts {
 }
 
 /**
- * Ask Genesis to share a path. This does NOT publish anything by itself: the
- * server answers with a proposal id, and for a platform disk that proposal
- * raises a decision card a human answers. The body carries only what the
- * contract names — the server resolves ownership from the bearer.
+ * Ask Genesis to share a NODE path. This does NOT publish anything by itself: the
+ * server answers with a proposal id and raises its decision card, which a human
+ * answers (A7: always card-gated; tenant nodes are 409 until card recipients land).
+ * The body carries only what the contract names — the server resolves ownership
+ * from the bearer. Workspace files are shared through aitherium.com/share.
  */
 export async function shareStoragePath(client: GenesisClient, opts: ShareOpts): Promise<StorageResult> {
   const body: Record<string, any> = { node: opts.node, path: opts.path };

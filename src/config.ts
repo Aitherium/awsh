@@ -1,9 +1,9 @@
-import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { reconcileTlsForEndpoint } from './tls-trust.js';
 import { getActiveToken, getActiveUser, ensureRootProfile, isRootProvisioningAllowed, type AuthUser } from './auth.js';
+import { isOffline, loadLayeredConfig } from './offline.js';
 
 export type BackendType = 'genesis' | 'adk' | 'unknown';
 
@@ -150,6 +150,12 @@ export interface ShellConfig {
    *  perception (vision/multimodal). When a role-specific provider is configured,
    *  inference for that role uses its llmUrl/model/apiKey instead of the default. */
   providers?: Partial<Record<'orchestrator' | 'reasoning' | 'perception', ProviderOverride>>;
+  /** Offline (config `offline: true` or AITHER_OFFLINE=1): no cloud rung at startup and
+   *  no mid-turn cloud failover. An air-gapped box must fail loudly, never dial out. */
+  offline?: boolean;
+  /** Set when a cloud fallback was REFUSED because the shell is offline: the url it
+   *  would have used. Lets the banner and the doctor say so instead of going quiet. */
+  cloudRefused?: string;
 }
 
 /** The always-on public edge the shell fails over to when no local backend is
@@ -239,6 +245,12 @@ export function roleProvider(
  *  and offer /login instead). Explicit mcp/llm URLs are preserved. */
 export function applyCloudFallback(config: ShellConfig, url: string = CLOUD_URL): void {
   const base = url.replace(/\/+$/, '');
+  // Offline: never repoint at a cloud edge. Record the refusal so the caller can say
+  // "offline, no local backend" instead of silently dialing out.
+  if (config.offline) {
+    config.cloudRefused = base;
+    return;
+  }
   // The import-time TLS gate may have relaxed verification for a private
   // fleet; the bearer/PAT is about to go to a PUBLIC edge, so restore strict TLS
   // BEFORE anything connects there.
@@ -261,23 +273,16 @@ export function applyCloudFallback(config: ShellConfig, url: string = CLOUD_URL)
 export function loadConfig(): ShellConfig {
   const home = homedir();
   const configDir = join(home, '.aither');
-  const configFile = join(configDir, 'shell.yaml');
 
-  let fileConfig: Record<string, string> = {};
-  if (existsSync(configFile)) {
-    try {
-      const content = readFileSync(configFile, 'utf-8');
-      // Split on /\r?\n/, NOT '\n'. shell.yaml is written CRLF on Windows; a bare
-      // '\n' split leaves a trailing '\r', and in JS '.' does NOT match '\r' (it
-      // is a line terminator), so the '$' anchor never matched and EVERY line was
-      // silently dropped — the entire config file was ignored on Windows
-      // (api_url/mcp_url/identity_url/model all fell back to defaults).
-      for (const line of content.split(/\r?\n/)) {
-        const match = line.match(/^(\w+):\s*(.+)$/);
-        if (match) fileConfig[match[1]] = match[2].trim().replace(/^["']|["']$/g, '');
-      }
-    } catch { /* ignore bad config */ }
-  }
+  // Layered: /usr/lib/awsh/shell.yaml < shell.d/*.yaml < /etc/awsh/shell.yaml
+  // < ~/.aither/shell.yaml (offline.ts). The system layers exist only on a machine image
+  // (awnix); elsewhere this is the user file alone, as before. Parsing splits on /\r?\n/
+  // -- a CRLF file split on '\n' once silently dropped every line on Windows.
+  // AWSH_CONFIG_ROOT relocates the system layers (tests, chroots).
+  const fileConfig: Record<string, string> = loadLayeredConfig({
+    home,
+    root: (process.env.AWSH_CONFIG_ROOT || '').trim() || undefined,
+  }).values;
 
   // Load auth from shared ~/.aither/auth.json.
   // Normally auto-provision root (like Linux console login). But when
@@ -345,6 +350,7 @@ export function loadConfig(): ShellConfig {
     backendName: '',
     endpointPinned: !!explicitEndpoint,
     providers: Object.keys(providers).length > 0 ? providers : undefined,
+    offline: isOffline(process.env, fileConfig),
   };
 }
 

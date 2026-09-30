@@ -16,6 +16,7 @@ import { execSync } from 'node:child_process';
 import { hostname, platform, release, arch, cpus, totalmem } from 'node:os';
 import chalk from 'chalk';
 import { VERSION as SHELL_VERSION } from './version.js';
+import { shellIsOffline } from './offline.js';
 
 const GENESIS_URL = process.env.AITHER_GENESIS_URL || 'http://localhost:8001';
 const GITHUB_REPO = 'Aitherium/AitherOS';
@@ -204,6 +205,13 @@ function submitViaGhCli(report: CrashReport): string | null {
   }
 }
 
+/** Offline, a crash report is never sent: not to Genesis, not via `gh issue create`, and
+ *  not on the non-TTY auto-consent path. Exported for the test. */
+export function crashReportAllowed(env: NodeJS.ProcessEnv = process.env,
+  opts?: { home?: string; root?: string }): boolean {
+  return !shellIsOffline(env, opts);
+}
+
 /** Main crash handler — called on uncaught errors. */
 async function handleCrash(error: Error | any, source: string): Promise<void> {
   const report = buildReport(error, source);
@@ -215,6 +223,12 @@ async function handleCrash(error: Error | any, source: string): Promise<void> {
     console.error(chalk.dim(`  Command: ${_currentCommand}`));
   }
   console.error('');
+
+  if (!crashReportAllowed()) {
+    console.error(chalk.dim('  offline: no error report sent (nothing leaves this machine).'));
+    console.error('');
+    return;
+  }
 
   const shouldSend = await askConfirm(
     chalk.yellow('  Send error report to help us fix this? (Y/n) '),

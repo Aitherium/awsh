@@ -7,6 +7,8 @@
  *   aither shop                    list them: installed? licensed? what to do next
  *   aither shop <product>          open its shop page
  *   aither install <product>       launch-ready check; opens the shop / download page
+ *   aither launch <product>        run an installed app (a CLI product such as Aither
+ *                                  Hearth runs right here, in this terminal)
  *   aither install <product> --from <url|file>
  *                                  put the download from your purchase email into
  *                                  ~/.aither/apps/<product>/ (https only)
@@ -19,6 +21,11 @@
  * gate on). Without awdk the answer is "unknown" and a license is saved only after a
  * structural check, with the previous file kept as a backup -- never silently
  * replaced by something that does not verify.
+ *
+ * A product that ships as a CLI (Aither Hearth: awdk's `aither-hearth` console
+ * script) names the arguments a launch passes (`launchArgs`: `serve --pair`). An
+ * executable that only MAY carry the product (`adk`, which has `adk home` only in
+ * recent awdk releases) counts as installed only when its `probeArgs` exit 0.
  *
  * The catalog mirrors AitherDesktop's core/products.py (the parity test there reads
  * this file).
@@ -40,6 +47,12 @@ export interface ShopProduct {
   kind: 'local' | 'hosted';
   pack: string | null;
   executables: string[];
+  /** executable -> the arguments a launch passes it (absent: none). */
+  launchArgs?: Record<string, string[]>;
+  /** executable -> arguments that must exit 0 before it counts as this product. */
+  probeArgs?: Record<string, string[]>;
+  /** Its output must be read (Hearth prints a pairing code): run it in a terminal. */
+  console?: boolean;
   webUrl?: string;
   blurb: string;
 }
@@ -51,10 +64,14 @@ export const SHOP_PRODUCTS: readonly ShopProduct[] = Object.freeze([
   { id: 'saga', name: 'Saga', kind: 'local', pack: 'saga', executables: ['saga'],
     blurb: 'An AI game master for solo tabletop RPGs, running on your PC.' },
   { id: 'agent-home', name: 'Aither Hearth', kind: 'local', pack: 'agent-home',
-    // NOT aither-hearth: that awdk console script prints help and exits when run
-    // with no arguments, so launching it would do nothing visible. Until it has a
-    // real no-argument action the product goes to the shop page (setup steps).
-    executables: ['agent-home', 'aither-agent-home'],
+    // awdk ships `aither-hearth`; bare it prints help and exits, so a launch runs
+    // `serve --pair` (the agent answers and prints the phone pairing code).
+    // agent-home / aither-agent-home are the pre-rename names, kept as fallbacks;
+    // `adk home serve --pair` covers an awdk older than the console script.
+    executables: ['aither-hearth', 'agent-home', 'aither-agent-home', 'adk'],
+    launchArgs: { 'aither-hearth': ['serve', '--pair'], adk: ['home', 'serve', '--pair'] },
+    probeArgs: { adk: ['home', '--help'] },
+    console: true,
     blurb: 'Your own agent on your own machine; reach it from your phone.' },
   { id: 'iris', name: 'Iris', kind: 'hosted', pack: null, executables: [],
     webUrl: 'https://aitherium.com/iris',
@@ -93,6 +110,10 @@ export interface ShopDeps {
   python?: (script: string, stdin: string) => { status: number | null; stdout: string };
   openUrl?: (url: string) => void;
   fetchImpl?: typeof fetch;
+  /** True when `file args...` exits 0 (the probe for an executable that MAY be the product). */
+  probe?: (file: string, args: string[]) => boolean;
+  /** Run an installed product in THIS terminal; returns its exit status. */
+  run?: (file: string, args: string[]) => number | null;
 }
 
 function defaultWhich(platform: string) {
@@ -120,6 +141,22 @@ function defaultOpenUrl(platform: string) {
   };
 }
 
+const probeCache = new Map<string, boolean>();
+
+function defaultProbe(file: string, args: string[]): boolean {
+  const key = JSON.stringify([file, ...args]);
+  if (!probeCache.has(key)) {
+    const r = spawnSync(file, args, { stdio: 'ignore', timeout: 30_000, windowsHide: true });
+    probeCache.set(key, !r.error && r.status === 0);
+  }
+  return probeCache.get(key)!;
+}
+
+function defaultRun(file: string, args: string[]): number | null {
+  const r = spawnSync(file, args, { stdio: 'inherit' });
+  return r.error ? null : r.status;
+}
+
 function resolved(deps: ShopDeps) {
   const env = deps.env || process.env;
   const platform = deps.platform || process.platform;
@@ -131,26 +168,45 @@ function resolved(deps: ShopDeps) {
     python: deps.python || defaultPython(env),
     openUrl: deps.openUrl || defaultOpenUrl(platform),
     fetchImpl: deps.fetchImpl || fetch,
+    probe: deps.probe || defaultProbe,
+    run: deps.run || defaultRun,
   };
 }
 
 // ── status ──────────────────────────────────────────────────────────────────
 
-export function findInstalled(p: ShopProduct, deps: ShopDeps = {}): string | null {
+export interface LaunchTarget { path: string; args: string[] }
+
+/** The executable and arguments a launch runs, or null. Hosted products are never installed. */
+export function findLaunch(p: ShopProduct, deps: ShopDeps = {}): LaunchTarget | null {
   if (p.kind !== 'local') return null;
   const d = resolved(deps);
+  const argsFor = (exe: string) => [...(p.launchArgs?.[exe] || [])];
+  const admitted = (exe: string, file: string) => {
+    const needs = p.probeArgs?.[exe];
+    return !needs || d.probe(file, [...needs]);
+  };
   const dir = join(appsDir(d.env), p.id);
   for (const exe of p.executables) {
     for (const name of d.platform === 'win32' ? [`${exe}.exe`, exe] : [exe]) {
       const candidate = join(dir, name);
-      if (d.fileExists(candidate)) return candidate;
+      if (d.fileExists(candidate) && admitted(exe, candidate)) return { path: candidate, args: argsFor(exe) };
     }
   }
   for (const exe of p.executables) {
     const hit = d.which(exe);
-    if (hit) return hit;
+    if (hit && admitted(exe, hit)) return { path: hit, args: argsFor(exe) };
   }
   return null;
+}
+
+export function findInstalled(p: ShopProduct, deps: ShopDeps = {}): string | null {
+  const hit = findLaunch(p, deps);
+  return hit ? hit.path : null;
+}
+
+function commandLine(t: LaunchTarget): string {
+  return [t.path, ...t.args].map(a => (/\s/.test(a) ? `"${a}"` : a)).join(' ');
 }
 
 const PACK_STATUS_PY = [
@@ -229,6 +285,7 @@ export function runShopCommand(args: string[], deps: ShopDeps = {}): number {
   d.log('');
   d.log(`  Buy:      aither shop <product>        (${SHOP_BASE})`);
   d.log('  Install:  aither install <product> [--from <download link>]');
+  d.log('  Launch:   aither launch <product>');
   d.log('  License:  aither license add <file|text>');
   return 0;
 }
@@ -261,9 +318,10 @@ export async function runProductInstall(args: string[], deps: ShopDeps = {}): Pr
   const from = flagValue(args, '--from');
   if (from) return installFrom(p, from, d);
 
-  const existing = findInstalled(p, deps);
+  const existing = findLaunch(p, deps);
   if (existing) {
-    d.log(`  ${p.name} is already installed: ${existing}`);
+    d.log(`  ${p.name} is already installed: ${existing.path}`);
+    d.log(`  Start it:  aither launch ${p.id}   (runs ${commandLine(existing)})`);
     return 0;
   }
   const status = p.pack ? packStatus([p.pack], deps) : null;
@@ -279,6 +337,40 @@ export async function runProductInstall(args: string[], deps: ShopDeps = {}): Pr
   }
   if (!args.includes('--no-open')) d.openUrl(url);
   return 0;
+}
+
+// ── aither launch <product> ─────────────────────────────────────────────────
+
+/** True when `aither launch <x>` names a product. */
+export function isProductLaunch(args: string[]): boolean {
+  return !!findProduct(args[0]);
+}
+
+/**
+ * Run an installed product. This command already has a terminal, so a CLI product
+ * (Hearth: `aither-hearth serve --pair`) runs right here and prints its pairing
+ * code; Ctrl+C stops it. Hosted opens its page; not installed goes where
+ * `aither install` goes (the download or the shop).
+ */
+export async function runProductLaunch(args: string[], deps: ShopDeps = {}): Promise<number> {
+  const d = resolved(deps);
+  const p = findProduct(args[0]);
+  if (!p) { d.log(`  Unknown product "${args[0]}".`); return 1; }
+  if (p.kind === 'hosted') {
+    d.log(`  ${p.name} is hosted. Opening ${p.webUrl}`);
+    d.openUrl(p.webUrl!);
+    return 0;
+  }
+  const target = findLaunch(p, deps);
+  if (!target) return runProductInstall([p.id, ...args.slice(1)], deps);
+  d.log(`  Starting ${p.name}: ${commandLine(target)}`);
+  if (p.console) d.log('  It runs in this terminal -- Ctrl+C stops it.');
+  const status = d.run(target.path, target.args);
+  if (status === null) {
+    d.log(`  Could not start ${p.name}. Run it yourself: ${commandLine(target)}`);
+    return 1;
+  }
+  return status;
 }
 
 async function installFrom(p: ShopProduct, from: string, d: ReturnType<typeof resolved>): Promise<number> {

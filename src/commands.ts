@@ -53,6 +53,7 @@ import {
   deskCommand,
   deskCommandHistory,
 } from './awdesk-bridge.js';
+import { deskCommands, deskRunCommand } from './awdesk-bridge.js';
 import {
   addProject, listProjects, switchProject, removeProject, getActiveWorkspace, pickDirectory,
 } from './workspace.js';
@@ -8232,7 +8233,7 @@ COMMANDS['report-bug'] = {
 // ── /desk command (awdesk, formerly awdesk; /desk stays as an alias) ──
 COMMANDS['desk'] = {
   description: 'Control the awdesk desktop overlay (avatar, tray, decision cards)',
-  usage: '/desk [status|start|show|hide|toggle|list|anim <name>|anims|agent <name>|agents|export|<character>]',
+  usage: '/desk [status|start|show|hide|toggle|list|commands|run <id> [arg]|anim <name>|anims|agent <name>|agents|export|<character>]',
   handler: async (_client: GenesisClient, args: string) => {
     const sub = args.trim().toLowerCase();
 
@@ -8264,6 +8265,39 @@ COMMANDS['desk'] = {
       } catch (err: any) {
         spinner.fail('Failed to check status');
         console.log(chalk.red(`  ${err?.message || err}\n`));
+      }
+      return;
+    }
+
+    // The desk's own command registry: the SAME rows its tray, avatar menu and
+    // Ctrl+K palette render. `/desk commands` lists them; `/desk run <id>` (or the
+    // bare id) runs one -- so a terminal and the tray cannot name an action
+    // differently, and a new desk command needs no change here.
+    const rawArgs = args.trim();
+    const firstWord = sub.split(/\s+/)[0];
+    if (sub === 'commands' || sub === 'cmds' || firstWord === 'run' || /^[a-z]+(\.[a-z0-9-]+)+$/.test(firstWord)) {
+      try {
+        if (sub === 'commands' || sub === 'cmds') {
+          const rows = await deskCommands();
+          console.log(chalk.bold(`\n  Desk commands (${rows.length}) — the same list as the tray and Ctrl+K\n`));
+          let group = '';
+          for (const row of rows) {
+            if (row.group !== group) { group = row.group; console.log(chalk.dim(`  ${group}`)); }
+            console.log(`    ${chalk.cyan(row.id.padEnd(30))} ${row.label}${row.prompt ? chalk.dim('  <' + row.prompt.placeholder + '>') : ''}`);
+          }
+          console.log(chalk.dim('\n  Run one: /desk run <id> [argument]   ·   or just /desk <id>\n'));
+          return;
+        }
+        const words = rawArgs.split(/\s+/);
+        const id = ((firstWord === 'run' ? words[1] : words[0]) || '').toLowerCase();
+        if (!id) { console.log(chalk.yellow('\n  Usage: /desk run <id> [argument]   (list them: /desk commands)\n')); return; }
+        const rest = words.slice(firstWord === 'run' ? 2 : 1).join(' ');
+        const result = await deskRunCommand(id, rest || undefined);
+        console.log(chalk.green(`\n  ✓ ${result.label || id}`));
+        if (result.verdict?.message) console.log(chalk.dim(`    ${result.verdict.message}`));
+        console.log('');
+      } catch (err: any) {
+        console.log(chalk.red(`\n  ${err?.message || err}\n`));
       }
       return;
     }

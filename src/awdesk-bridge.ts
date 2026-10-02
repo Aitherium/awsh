@@ -443,6 +443,44 @@ export async function deskDesktop(surface: 'overlay' | 'app' | 'status'): Promis
   return text ? JSON.parse(text) : {};
 }
 
+/** One row of the desk's command registry (electron/command-registry.cjs). */
+export interface DeskCommand { id: string; label: string; group: string; prompt?: { placeholder: string } }
+
+/**
+ * The desk's OWN command list -- the rows its tray, its avatar menu and its Ctrl+K
+ * palette are rendered from. `/desk` used to carry a hand-written verb list here,
+ * which is how a terminal and a tray end up naming the same action differently (or
+ * one of them not having it at all: the AitherOS Online overlay was reachable from
+ * awsh for a week while no menu on the desk itself could open it).
+ */
+export async function deskCommands(): Promise<DeskCommand[]> {
+  const resp = await fetch(`${PERSONA_BASE}/commands`, { signal: AbortSignal.timeout(8_000) });
+  if (!resp.ok) {
+    throw new Error(resp.status === 404
+      ? 'this awdesk has no /commands route (older build) — update Desk'
+      : `desk commands failed: HTTP ${resp.status}`);
+  }
+  const body = await resp.json() as { commands?: DeskCommand[] };
+  return Array.isArray(body.commands) ? body.commands : [];
+}
+
+/** Run one by id. A refusal (unknown id) carries the desk's own sentence. */
+export async function deskRunCommand(id: string, arg?: string): Promise<Record<string, any>> {
+  const resp = await fetch(`${PERSONA_BASE}/commands/run`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(arg === undefined ? { id } : { id, arg }),
+    signal: AbortSignal.timeout(30_000),
+  });
+  const text = await resp.text();
+  // An older desk, or a proxy in front of it, answers a non-JSON body: report the
+  // status, not a SyntaxError about the body nobody asked to see.
+  let body: Record<string, any> = {};
+  try { body = text ? JSON.parse(text) : {}; } catch { body = {}; }
+  if (!resp.ok) throw new Error(body?.error || `desk command '${id}' failed: HTTP ${resp.status}`);
+  return body;
+}
+
 /** Control the fleet: send an action (down, up, gaming, resume, adopt, etc).
  *  Returns the result object or throws. */
 export async function fleetControl(action: string): Promise<Record<string, any>> {

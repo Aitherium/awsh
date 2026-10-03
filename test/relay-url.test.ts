@@ -40,6 +40,12 @@ function installFakeWS(refuse: (url: string) => boolean) {
 }
 
 const tick = () => new Promise((r) => setTimeout(r, 20));
+// The credential guard resolves the relay host before it dials (on Linux), so a
+// fixed 20 ms is a race on a CI runner. Wait for the outcome instead, bounded.
+const waitFor = async (done: () => boolean, ms = 2000) => {
+  const end = Date.now() + ms;
+  while (!done() && Date.now() < end) await new Promise((r) => setTimeout(r, 10));
+};
 
 test('resolveRelayUrl: AITHER_RELAY_URL wins, else the local default', () => {
   process.env.AITHER_RELAY_URL = 'wss://example.test/ws/chat/';
@@ -65,7 +71,7 @@ test('hosted fallback chosen when the local port refuses (signed in)', async () 
     handlers: { onStatus: (s, d) => statuses.push(`${s}${d ? `:${d}` : ''}`) },
   });
   c.connect('#general');
-  await tick();
+  await waitFor(() => sent.some((s) => s.data.type === 'join'));
   c.disconnect();
   assert.deepEqual(opened, [LOCAL_RELAY_URL, HOSTED_RELAY_URL]);
   assert.ok(statuses.includes('open'), statuses.join(','));

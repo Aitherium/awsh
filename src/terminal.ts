@@ -20,6 +20,7 @@
  */
 import chalk from 'chalk';
 import { getActiveToken } from './auth.js';
+import { refuseForeignListener } from './credential-guard.js';
 
 export interface TerminalOptions {
   /** Dev-workspace container to attach to; omitted → shell in the tunnel container. */
@@ -69,6 +70,11 @@ export async function connectTerminal(opts: TerminalOptions = {}): Promise<numbe
   const params = new URLSearchParams({ token });
   if (opts.container) params.set('container', opts.container);
   const url = `wss://${host}/tunnel/ssh?${params.toString()}`;
+  // The token rides in the query: never hand it to a loopback port another account holds.
+  try { await refuseForeignListener(url); } catch (e: any) {
+    console.error(chalk.red(`  ${e?.message ?? e}`));
+    return 1;
+  }
 
   const target = opts.container ? `workspace ${chalk.cyan(opts.container)}` : `${chalk.cyan(host)}`;
   process.stderr.write(chalk.dim(`  connecting to ${target} …\n`));

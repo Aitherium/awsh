@@ -15,6 +15,8 @@
  * it) — no custom WS headers needed, so the platform global WebSocket works.
  */
 
+import { refuseForeignListener, type GuardEnv } from './credential-guard.js';
+
 export interface RelayMessage {
   channel: string;
   nick: string;
@@ -94,10 +96,13 @@ export class RelayClient {
   private closedByUser = false;
   private backoff = 1000;
   private outbox: string[] = [];  // messages typed while the socket is down
+  private readonly guardEnv?: GuardEnv;  // tests only: a fake /proc/net + uid
 
-  constructor(opts: { url?: string; token?: string; nick: string; handlers: RelayHandlers }) {
+  constructor(opts: { url?: string; token?: string; nick: string; handlers: RelayHandlers;
+    guardEnv?: GuardEnv }) {
     this.url = (opts.url || resolveRelayUrl()).replace(/\/+$/, '');
     this.token = opts.token;
+    this.guardEnv = opts.guardEnv;
     this.nick = opts.nick;
     this.handlers = opts.handlers;
   }
@@ -112,6 +117,27 @@ export class RelayClient {
     const p: Record<string, unknown> = { type: 'join', channel };
     if (this.token) p.token = this.token; else p.nick = this.nick;
     return p;
+  }
+
+  /** Why the account token must not go to this.url (a port on this machine another
+   *  local account holds -- the local relay is a well-known port), or null. */
+  private async tokenRefusal(): Promise<string | null> {
+    if (!this.token) return null;
+    try { await refuseForeignListener(this.url, this.guardEnv); return null; } catch (e: any) {
+      return String(e?.message || e);
+    }
+  }
+
+  /** Send the join -- re-checking the listener right before the token leaves. */
+  private async sendJoin(): Promise<boolean> {
+    const refusal = await this.tokenRefusal();
+    if (refusal) {
+      this.handlers.onError?.(refusal);
+      try { this.ws?.close(); } catch { /* ignore */ }
+      return false;
+    }
+    this.sendRaw(this.joinPayload(this.channel));
+    return true;
   }
 
   /** HTTP base for the relay REST API (derive from the ws url). */
@@ -168,8 +194,19 @@ export class RelayClient {
   }
 
   private open(): void {
+    void this.openChecked();
+  }
+
+  private async openChecked(): Promise<void> {
     const WS: any = (globalThis as any).WebSocket;
     if (!WS) { this.handlers.onError?.('WebSocket unavailable (needs Node 22+/bun).'); return; }
+    const refusal = await this.tokenRefusal();
+    if (this.closedByUser) return;
+    if (refusal) {
+      this.handlers.onError?.(refusal);
+      this.scheduleReconnect();
+      return;
+    }
     this.handlers.onStatus?.('connecting');
     let ws: any;
     try { ws = new WS(this.url); } catch (e: any) {
@@ -184,12 +221,12 @@ export class RelayClient {
       this.everOpened = true;
       this.backoff = 1000;
       this.handlers.onStatus?.('open');
-      this.sendRaw(this.joinPayload(this.channel));
-      // Flush anything typed while we were down (after the rejoin).
-      if (this.outbox.length) {
+      void this.sendJoin().then((joined) => {
+        // Flush anything typed while we were down (after the rejoin).
+        if (!joined || !this.outbox.length) return;
         const pending = this.outbox.splice(0);
         for (const content of pending) this.sendRaw({ type: 'message', channel: this.channel, content });
-      }
+      });
     });
     ws.addEventListener('message', (ev: any) => this.onData(ev.data));
     ws.addEventListener('close', () => {
@@ -253,7 +290,7 @@ export class RelayClient {
   /** Switch channels (server sends fresh history + userlist). */
   join(channel: string): void {
     this.channel = channel.startsWith('#') ? channel : `#${channel}`;
-    this.sendRaw(this.joinPayload(this.channel));
+    void this.sendJoin();
   }
 
   /** Send a chat message to the current channel. Queues if the socket is mid-

@@ -18,6 +18,7 @@ import { writeFileSync, mkdirSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { amplitudeEnvelope, levelAt, type Envelope } from './audio-envelope.js';
+import { assertCredentialTarget } from '../credential-guard.js';
 
 export interface VoiceOptions {
   baseUrl?: string;                   // service root incl. /voice prefix; local or gateway
@@ -93,7 +94,8 @@ function ffplayAvailable(): boolean {
   catch { return false; }
 }
 
-function httpJson(url: string, body: unknown, headers: Record<string, string> = {}, timeoutMs = 20000): Promise<any> {
+async function httpJson(url: string, body: unknown, headers: Record<string, string> = {}, timeoutMs = 20000): Promise<any> {
+  await assertCredentialTarget(url, headers);
   return new Promise((resolve, reject) => {
     const u = new URL(url);
     const payload = Buffer.from(JSON.stringify(body));
@@ -384,6 +386,7 @@ export class VoiceController {
     }
     for (const url of urls) {
       try {
+        await assertCredentialTarget(url, this.opts.headers);
         const u = new URL(url);
         const ok = await new Promise<boolean>((resolve) => {
           const req = (u.protocol === 'https:' ? httpsRequest : httpRequest)(

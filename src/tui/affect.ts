@@ -12,6 +12,7 @@
 
 import https from 'node:https';
 import http from 'node:http';
+import { assertCredentialTarget } from '../credential-guard.js';
 
 /**
  * The affect state: valence (-1 to 1), arousal (0 to 1), confidence (0 to 1),
@@ -153,7 +154,8 @@ export class AffectPoller {
   /**
    * Fetch a URL and parse the response as JSON. Uses node:https or node:http.
    */
-  private fetchUrl(url: string, reqOpts?: any): Promise<any> {
+  private async fetchUrl(url: string, reqOpts?: any): Promise<any> {
+    await assertCredentialTarget(url, reqOpts?.headers);
     return new Promise((resolve, reject) => {
       const isHttps = url.startsWith('https');
       const client = isHttps ? https : http;

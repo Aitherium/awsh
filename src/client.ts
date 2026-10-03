@@ -63,12 +63,18 @@ function decodeProcAddr(hex: string): string {
 
 /**
  * Every loopback address a client dialling `host` may actually reach, else [] (not
- * loopback). `localhost` is BOTH loopbacks: resolvers try ::1 and 127.0.0.1.
+ * loopback). `localhost` is BOTH loopbacks: resolvers try ::1 and 127.0.0.1, and
+ * glibc/systemd-resolved answer any `*.localhost` name the same way (RFC 6761). The
+ * unspecified addresses dial this machine too: Linux connects 0.0.0.0 to 127.0.0.1
+ * and :: to ::1.
  */
 export function connectTargets(host: string): string[] {
-  host = host.replace(/^\[|\]$/g, '').toLowerCase();
-  if (host === 'localhost' || host === 'localhost.localdomain') return ['127.0.0.1', '::1'];
-  if (host === '::1') return ['::1'];
+  host = host.replace(/^\[|\]$/g, '').replace(/\.$/, '').toLowerCase();
+  if (host === 'localhost' || host === 'localhost.localdomain' || host.endsWith('.localhost')) {
+    return ['127.0.0.1', '::1'];
+  }
+  if (host === '::1' || host === '::') return ['::1'];
+  if (host === '0.0.0.0') return ['127.0.0.1'];
   let v4 = host;
   const mappedHex = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(host);
   if (mappedHex) {

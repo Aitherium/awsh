@@ -106,6 +106,7 @@ import { renderBanner, createStreamRenderer } from './renderer.js';
 import { buildProbes, discoverLocalServices, probeHealth, pickServingModel } from './status-banner.js';
 import { startRepl } from './repl.js';
 import { installCrashReporter, setCurrentCommand } from './crash-reporter.js';
+import { installCredentialGuard } from './credential-guard.js';
 import { collectPositional } from './cli-args.js';
 import {
   configureRemoteSync, recordTurn, loadSession, loadRemoteSession,
@@ -146,6 +147,10 @@ async function resolveResume(
 // Install global crash reporter — catches uncaught exceptions/rejections,
 // prompts user to send error report, creates GitHub issue automatically.
 installCrashReporter();
+
+// No credential (account bearer, harness bearer, daemon token) reaches a loopback
+// port another local account holds -- every fetch in the process goes through it.
+installCredentialGuard();
 
 /**
  * Read from package.json at runtime, never hardcoded.

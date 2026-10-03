@@ -7,13 +7,18 @@
  * says what actually happened. One path means the cockpit and the CLI can never
  * disagree about where a line went.
  *
- * The capability tier on the row decides what the operator is told BEFORE anything
- * is sent:
- *   - full           a daemon-owned pty: the line lands now.
- *   - turn-boundary  a discovered tab: the line is delivered at the end of its turn.
- *   - none           view only (an exited session, or rows read from disk because the
- *                    daemon is down). Refused locally -- nothing is published, because
- *                    a line queued for a process that will never read it is a lie.
+ * What the operator is told BEFORE anything is sent is decided from the row's
+ * `actions` (GET /sessions/unified, adk/harnesses/session_verbs.py row_actions): the
+ * daemon decides each verb ONCE, next to the rows, with a `why_not` reason for every
+ * verb it refuses. The steering event is delivered by the daemon's dispatcher on the
+ * pty tier (`input`) or the steering mailbox (`message`), so:
+ *   - input true     the line lands now (a daemon-owned pty).
+ *   - message true   queued; the session's prompt hook drains it at its next turn.
+ *   - neither        refused locally with the daemon's own why_not -- nothing is
+ *                    published, because a line queued for a process that will never
+ *                    read it is a lie.
+ * A row without `actions` (an older daemon, or rows read from disk because the daemon
+ * is down) falls back to the legacy `steer_capability` tier.
  */
 
 import { api as daemonApi, tellEvent } from './harness-client.js';
@@ -29,8 +34,29 @@ export interface SteerPlan {
   note: string;
 }
 
-/** Pure: what a steer on this row will do, decided from its capability tier. */
-export function steerPlan(session: Pick<UnifiedSession, 'steer_capability' | 'status'>): SteerPlan {
+/** The daemon's per-row verb decision (session_verbs.row_actions). */
+export interface RowActions {
+  message?: boolean;
+  interrupt?: boolean;
+  focus?: boolean;
+  input?: boolean;
+  why_not?: Record<string, string>;
+}
+
+export type SteerRow = Pick<UnifiedSession, 'steer_capability' | 'status'> & { actions?: RowActions | null };
+
+/** Pure: what a steer on this row will do, decided from the daemon's row.actions. */
+export function steerPlan(session: SteerRow): SteerPlan {
+  const actions = session.actions;
+  if (actions && typeof actions === 'object') {
+    if (actions.input === true) return { allowed: true, when: 'now', note: 'lands now (daemon-owned pty)' };
+    if (actions.message === true) {
+      return { allowed: true, when: 'turn-boundary', note: 'queued; delivered at its next prompt' };
+    }
+    const why = actions.why_not || {};
+    return { allowed: false, when: null, note: why.message || why.input || 'the daemon offers no way to message this session' };
+  }
+  // Legacy: a row without actions (older daemon, or read from disk).
   if (session.status === 'exited' || session.status === 'dead') {
     return { allowed: false, when: null, note: 'session has exited - nothing is reading its input' };
   }
@@ -64,7 +90,7 @@ export interface SteerOptions {
  * TUI overlay, and a stack trace there is worse than a one-line reason.
  */
 export async function steerFocusedSession(
-  session: Pick<UnifiedSession, 'id' | 'title' | 'steer_capability' | 'status'>,
+  session: Pick<UnifiedSession, 'id' | 'title'> & SteerRow,
   text: string,
   opts: SteerOptions = {},
 ): Promise<SteerResult> {

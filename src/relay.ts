@@ -50,20 +50,43 @@ export interface RelayChannel {
   user_count?: number;
 }
 
-/** Resolve the relay WS URL: AITHER_RELAY_URL override, else local CommunicationCore. */
+/** CommunicationCore's relay on a fleet host: root-mounted on 8205, TLS-only (the
+ *  shell sets NODE_TLS_REJECT_UNAUTHORIZED=0 for its self-signed cert). */
+export const LOCAL_RELAY_URL = 'wss://127.0.0.1:8205/ws/chat';
+
+/** The hosted relay socket (measured 2026-10-02: wss://relay.aitherium.com/ws/chat
+ *  answers 101; irc.aitherium.com answers 502). */
+export const HOSTED_RELAY_URL = 'wss://relay.aitherium.com/ws/chat';
+
+/** Resolve the relay WS URL: AITHER_RELAY_URL override, else local CommunicationCore.
+ *  Off a fleet host the local port refuses; RelayClient then moves a signed-in
+ *  session to HOSTED_RELAY_URL (see relayFallbackUrl). */
 export function resolveRelayUrl(): string {
   const env = process.env.AITHER_RELAY_URL;
   if (env) return env.replace(/\/+$/, '');
-  // Local default — CommunicationCore serves the relay (root-mounted) on 8205,
-  // TLS-only, so wss://. The shell sets NODE_TLS_REJECT_UNAUTHORIZED=0 for the
-  // self-signed localhost cert. Point at wss://irc.aitherium.com/ws/chat for the
-  // hosted relay via AITHER_RELAY_URL.
-  return 'wss://127.0.0.1:8205/ws/chat';
+  return LOCAL_RELAY_URL;
+}
+
+/**
+ * Pure: where to reconnect after a socket closed. Returns the hosted relay URL only
+ * when ALL hold: the socket never opened (the port refused, not a dropped session),
+ * the URL is the local default, AITHER_RELAY_URL is unset (an explicit choice always
+ * wins), and the session is signed in (the hosted relay resolves identity from the
+ * token). Otherwise null: retry the same URL.
+ */
+export function relayFallbackUrl(
+  currentUrl: string,
+  opts: { everOpened: boolean; token?: string; envUrl?: string },
+): string | null {
+  if (opts.everOpened || !opts.token || opts.envUrl) return null;
+  if (currentUrl.replace(/\/+$/, '') !== LOCAL_RELAY_URL) return null;
+  return HOSTED_RELAY_URL;
 }
 
 export class RelayClient {
   private ws: any = null;
-  private readonly url: string;
+  private url: string;
+  private everOpened = false;  // any socket on this.url reached 'open'
   private readonly token?: string;
   readonly nick: string;
   private channel = '#general';
@@ -155,7 +178,10 @@ export class RelayClient {
       return;
     }
     this.ws = ws;
+    let opened = false;
     ws.addEventListener('open', () => {
+      opened = true;
+      this.everOpened = true;
       this.backoff = 1000;
       this.handlers.onStatus?.('open');
       this.sendRaw(this.joinPayload(this.channel));
@@ -168,8 +194,19 @@ export class RelayClient {
     ws.addEventListener('message', (ev: any) => this.onData(ev.data));
     ws.addEventListener('close', () => {
       this.ws = null;
-      if (this.closedByUser) this.handlers.onStatus?.('closed');
-      else this.scheduleReconnect();
+      if (this.closedByUser) { this.handlers.onStatus?.('closed'); return; }
+      const next = opened ? null : relayFallbackUrl(this.url, {
+        everOpened: this.everOpened, token: this.token, envUrl: process.env.AITHER_RELAY_URL,
+      });
+      if (next) {
+        // Off a fleet host: the local relay port refused. Move to the hosted relay now
+        // (no backoff) -- for the rest of this client's life.
+        this.url = next;
+        this.handlers.onStatus?.('reconnecting', `local relay refused; using ${next}`);
+        this.open();
+        return;
+      }
+      this.scheduleReconnect();
     });
     ws.addEventListener('error', () => { /* a close event follows; reconnect there */ });
   }

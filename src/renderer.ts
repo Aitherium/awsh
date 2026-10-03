@@ -741,6 +741,10 @@ export function createStreamRenderer(sessionId?: string, prompt?: string, steeri
   const traceErrors: string[] = [];
   let traceContextSources: Record<string, any> = {};
   let traceModel = '';
+  // Set when MicroScheduler answered from a stand-in: Genesis puts
+  // `route: {requested, served_by, cross_model}` on the complete event.
+  let traceAnsweredBy = '';
+  let traceAskedFor = '';
   let traceAgent = '';
   let traceTurns = 0;
   let lastKnownMaxTurns: number | string = '?';  // Populated by turn_progress
@@ -1242,6 +1246,11 @@ export function createStreamRenderer(sessionId?: string, prompt?: string, steeri
           // | time]" lines the user saw.
           const _cm = event.data.model || event.data.model_used;
           if (_cm && _cm !== 'auto' && _cm !== 'unknown') traceModel = _cm;
+          const _route = event.data.route;
+          if (_route && _route.cross_model === true && typeof _route.served_by === 'string' && _route.served_by) {
+            traceAnsweredBy = _route.served_by;
+            traceAskedFor = typeof _route.requested === 'string' ? _route.requested : '';
+          }
           if (event.data.agent) traceAgent = event.data.agent;
           if (event.data.turns_completed) traceTurns = event.data.turns_completed;
           break;
@@ -2311,6 +2320,9 @@ export function createStreamRenderer(sessionId?: string, prompt?: string, steeri
       const parts: string[] = [];
       if (traceAgent) parts.push(T.violet(T.G.agent) + ' ' + T.muted(traceAgent));
       if (traceModel) parts.push(T.dim(traceModel));
+      if (traceAnsweredBy) {
+        parts.push(T.dim(`answered by ${traceAnsweredBy}${traceAskedFor ? ` (asked for ${traceAskedFor})` : ''}`));
+      }
       if (traceTurns > 0) parts.push(T.dim(`${traceTurns}/${lastKnownMaxTurns} turns`));
       if (traceToolCalls.length > 0) parts.push(T.dim(`${traceToolCalls.length} tools`));
       parts.push(T.dim(`${(elapsed / 1000).toFixed(1)}s`));

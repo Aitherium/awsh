@@ -43,6 +43,114 @@ function sessionBearer(): string | null {
   }
 }
 
+/** A /proc/net/tcp{,6} address as text; an IPv4-mapped IPv6 address as its IPv4. */
+function decodeProcAddr(hex: string): string {
+  const v4 = (h: string) => [6, 4, 2, 0].map((i) => parseInt(h.slice(i, i + 2), 16)).join('.');
+  if (hex.length === 8) return v4(hex);
+  // Four 32-bit words, each in host (little-endian) order.
+  const bytes: number[] = [];
+  for (let w = 0; w < 32; w += 8) {
+    for (const i of [6, 4, 2, 0]) bytes.push(parseInt(hex.slice(w + i, w + i + 2), 16));
+  }
+  const zeros = (a: number, b: number) => bytes.slice(a, b).every((x) => x === 0);
+  if (zeros(0, 10) && bytes[10] === 0xff && bytes[11] === 0xff) return bytes.slice(12).join('.');
+  if (zeros(0, 16)) return '::';
+  if (zeros(0, 15) && bytes[15] === 1) return '::1';
+  const groups: string[] = [];
+  for (let i = 0; i < 16; i += 2) groups.push(((bytes[i] << 8) | bytes[i + 1]).toString(16));
+  return groups.join(':');
+}
+
+/**
+ * Every loopback address a client dialling `host` may actually reach, else [] (not
+ * loopback). `localhost` is BOTH loopbacks: resolvers try ::1 and 127.0.0.1.
+ */
+export function connectTargets(host: string): string[] {
+  host = host.replace(/^\[|\]$/g, '').toLowerCase();
+  if (host === 'localhost' || host === 'localhost.localdomain') return ['127.0.0.1', '::1'];
+  if (host === '::1') return ['::1'];
+  let v4 = host;
+  const mappedHex = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(host);
+  if (mappedHex) {
+    const hi = parseInt(mappedHex[1], 16);
+    const lo = parseInt(mappedHex[2], 16);
+    v4 = [hi >> 8, hi & 0xff, lo >> 8, lo & 0xff].join('.');
+  } else if (host.startsWith('::ffff:')) {
+    v4 = host.slice(7);
+  }
+  return /^127(\.\d{1,3}){3}$/.test(v4) ? [v4] : [];
+}
+
+/**
+ * The uid of EVERY LISTEN socket on `port` that could take a connection to one of
+ * `targets` -- bound to the target itself or to a wildcard (0.0.0.0, ::) -- from tcp
+ * and tcp6, IPv4-mapped rows included. [] = no such listener; null = the table could
+ * not be read (not Linux).
+ */
+export function listenerUids(port: number, targets: string[],
+  procNet: string = '/proc/net'): number[] | null {
+  const v6 = targets.some((t) => t.includes(':'));
+  const v4 = targets.some((t) => !t.includes(':'));
+  const uids: number[] = [];
+  let seen = false;
+  for (const name of ['tcp', 'tcp6']) {
+    let rows: string[];
+    try { rows = readFileSync(join(procNet, name), 'ascii').split('\n').slice(1); } catch { continue; }
+    seen = true;
+    for (const row of rows) {
+      const cols = row.trim().split(/\s+/);
+      if (cols.length < 8 || cols[3] !== '0A') continue;
+      const at = cols[1].lastIndexOf(':');
+      if (parseInt(cols[1].slice(at + 1), 16) !== port) continue;
+      const addr = decodeProcAddr(cols[1].slice(0, at));
+      const wildcard = (addr === '0.0.0.0' && v4) || (addr === '::' && (v4 || v6));
+      if (targets.includes(addr) || wildcard) uids.push(Number(cols[7]));
+    }
+  }
+  return seen ? uids : null;
+}
+
+/** The header an awdk agent daemon reads its owner's local credential from. */
+export const LOCAL_TOKEN_HEADER = 'X-Aither-Local-Token';
+
+/**
+ * The owner's local credential for an awdk daemon on THIS machine -- ONLY when
+ * `baseUrl` is loopback, so it can never be sent off the box.
+ *
+ * awdk's daemon (adk/local_auth.py) mints ~/.aither/daemon-token (0600) and, on an
+ * offline box, refuses every caller that cannot present it: "loopback" names a
+ * machine, not a person, and any local user's process could otherwise drive the
+ * owner's agent. Reading the file proves we run as the owner.
+ *
+ * A loopback port is first-come: another account can bind it while our daemon is
+ * down, or bind the OTHER loopback (`localhost` reaches 127.0.0.1 and ::1). Where the
+ * kernel says who listens, EVERY reachable listener must be ours, and no listener at
+ * all withholds too. Where it cannot say (not Linux), the loopback rule alone applies.
+ */
+export function localDaemonToken(baseUrl: string, home: string = homedir(),
+  procNet: string = '/proc/net',
+  uid: number | null = typeof process.getuid === 'function' ? process.getuid() : null,
+): string | null {
+  let targets: string[] = [];
+  let port = 0;
+  try {
+    const u = new URL(baseUrl);
+    targets = connectTargets(u.hostname);
+    port = Number(u.port) || (u.protocol === 'https:' ? 443 : 80);
+  } catch { return null; }
+  if (targets.length === 0) return null;
+  if (uid !== null) {
+    const uids = listenerUids(port, targets, procNet);
+    if (uids !== null && (uids.length === 0 || uids.some((u) => u !== uid))) return null;
+  }
+  try {
+    const value = readFileSync(join(home, '.aither', 'daemon-token'), 'utf-8').trim();
+    return value || null;
+  } catch {
+    return null;
+  }
+}
+
 export interface SSEEvent {
   type: string;
   data: Record<string, any>;
@@ -254,6 +362,10 @@ export class GenesisClient {
     }
     if (this._userId) {
       headers['X-User-ID'] = this._userId;
+    }
+    const local = localDaemonToken(this.baseUrl);
+    if (local) {
+      headers[LOCAL_TOKEN_HEADER] = local;
     }
     return headers;
   }

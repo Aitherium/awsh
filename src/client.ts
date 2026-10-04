@@ -1275,6 +1275,22 @@ export class GenesisClient {
     let buffer = '';
     const think = new ThinkFilter();
     const started = Date.now();
+    // MicroScheduler's NATIVE event shape arrives on this path too. Its
+    // /v1/chat/completions passes llm_generate's own stream through verbatim
+    // when stream:true -- `{"type":"token","t":"..."}` then
+    // `{"type":"complete","full_content":"..."}`, no `choices` at all -- and the
+    // gateway proxies it byte-for-byte. Measured 2026-10-03: once #11420 stopped
+    // the gateway 500ing (which had masked this by forcing the non-stream retry),
+    // every omnibox turn got a 200 carrying ~30 tokens and printed "(no answer
+    // from the agent)" in 0.3 s, because nothing here read `t`.
+    let yielded = false;
+    let nativeFinal = '';
+    const emit = (text: string): SSEEvent | null => {
+      const safe = think.push(text);
+      if (!safe) return null;
+      yielded = true;
+      return { type: 'token', data: { type: 'token', t: safe } };
+    };
     try {
       while (true) {
         const { done, value } = await reader.read();
@@ -1288,21 +1304,35 @@ export class GenesisClient {
           if (!l.startsWith('data:')) continue;
           const payload = l.slice(5).trim();
           if (payload === '[DONE]') continue;
-          try {
-            const json = JSON.parse(payload);
-            const choice = json.choices?.[0];
-            const delta = choice?.delta?.content ?? choice?.message?.content;
-            if (delta) {
-              // Tag-aware and chunk-safe; see src/think-filter.ts for why this
-              // cannot be a per-chunk regex.
-              const safe = think.push(String(delta));
-              if (safe) yield { type: 'token', data: { type: 'token', t: safe } };
-            }
-          } catch { /* skip keep-alives / non-JSON */ }
+          let json: any;
+          try { json = JSON.parse(payload); } catch { continue; /* keep-alives / non-JSON */ }
+          const choice = json?.choices?.[0];
+          let delta = choice?.delta?.content ?? choice?.message?.content;
+          if (!choice && json?.type === 'token') delta = json.t ?? json.token;
+          if (!choice && json?.type === 'complete') {
+            nativeFinal = String(json.full_content || json.content || '');
+          }
+          // The gateway reports a failed upstream as `data: {"error": ...}`; a
+          // swallowed error is a 200 with no answer, which reads as a mute model.
+          const err = json?.error ?? (json?.type === 'error' ? json.message : undefined);
+          if (!choice && err) {
+            throw new Error(`Inference failed: ${typeof err === 'string' ? err : (err.message || JSON.stringify(err))}`);
+          }
+          if (delta) {
+            // Tag-aware and chunk-safe; see src/think-filter.ts for why this
+            // cannot be a per-chunk regex.
+            const ev = emit(String(delta));
+            if (ev) yield ev;
+          }
         }
       }
     } finally {
       reader.releaseLock();
+    }
+    // A native stream that carried no tokens but a final answer: use it.
+    if (!yielded && nativeFinal) {
+      const ev = emit(nativeFinal);
+      if (ev) yield ev;
     }
     const tail = think.flush();
     if (tail) yield { type: 'token', data: { type: 'token', t: tail } };

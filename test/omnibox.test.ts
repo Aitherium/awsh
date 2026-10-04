@@ -160,7 +160,7 @@ describe('emitted shell integrations', () => {
     // reverted fix.
     const NL = String.fromCharCode(10);
     const gate = s
-      .slice(s.lastIndexOf('$global:__AwshInteractive'))
+      .slice(s.indexOf('$global:__AwshInteractive ='))
       .split(NL).filter((l) => !l.trim().startsWith('#')).join(' ');
     assert.match(gate, /noe/i,
       '-NoExit is not treated as interactive — the terminal-profile install is inert');
@@ -168,6 +168,20 @@ describe('emitted shell integrations', () => {
     // BEFORE the -Command rejection, or the two cancel out.
     assert.ok(gate.search(/noe/i) < gate.indexOf('EncodedCommand'),
       '-NoExit must be checked before the -Command/-File rejection');
+  });
+
+  test('pwsh: prose that fails to PARSE reaches the omnibox, unfinished code does not', () => {
+    // MEASURED 2026-10-03: 'do you think ur funny' is a do-loop with no body, so
+    // it died as ParserError before CommandNotFoundAction could see it. The Enter
+    // handler takes a COMPLETE parse failure only; IncompleteInput is a multi-line
+    // paste in progress ('if ($x) {') and must keep reaching the continuation prompt.
+    const s = omniboxInitScript('pwsh');
+    const NL = String.fromCharCode(10);
+    const code = s.split(NL).filter((l) => !l.trim().startsWith('#')).join(' ');
+    assert.match(code, /Set-PSReadLineKeyHandler -Key Enter/);
+    assert.match(code, /-not \(\$err \| Where-Object \{ \$_\.IncompleteInput \}\)/,
+      'without the IncompleteInput guard every multi-line paste becomes a question');
+    assert.match(code, /AcceptLine\(\)/, 'the handler must still accept the line');
   });
 
   test('pwsh: keeps GetNewClosure (its absence fails SILENTLY as an empty query)', () => {

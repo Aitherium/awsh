@@ -228,6 +228,57 @@ if (-not $global:__AwshOmnibox) {
             -not ($global:__AwshCli |
                   Where-Object { $_ -match '^-(c|Command|f|File|e|EncodedCommand)$' })
         }
+
+    # ── prose that does not PARSE ────────────────────────────────────────────
+    # CommandNotFoundAction only sees a line that parsed. 'do you think ur funny'
+    # is a do-loop with no body and '- do you ...' a unary minus with no operand,
+    # so both died as ParserError before any command lookup (measured 2026-10-03:
+    # 'you think you funny' answered, 'do you think ur funny' did not). PSReadLine
+    # sees the line before the parser runs, so Enter checks it there.
+    #
+    # Only a COMPLETE parse failure counts. A line PowerShell reports as
+    # IncompleteInput ('if ($x) {', 'Get-ChildItem |') is the start of real code,
+    # and taking it would break every multi-line paste. A line carrying code
+    # punctuation is a typo in code, and the parser's error is the honest answer.
+    function global:awsh-ask {
+        param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Words)
+        $exe = Get-Command awsh -CommandType Application -ErrorAction SilentlyContinue |
+               Select-Object -First 1
+        if (-not $exe) { Write-Error 'awsh is not installed'; return }
+        $global:__AwshBusy = $true
+        $env:AWSH_OMNIBOX_SESSION = "$PID"
+        try     { & $exe.Source ask --omnibox -- ($Words -join ' ') }
+        finally { $global:__AwshBusy = $false }
+    }
+
+    $global:__AwshEnterOwner = $null
+    if ($global:__AwshInteractive -and
+        (Get-Command Set-PSReadLineKeyHandler -ErrorAction SilentlyContinue)) {
+        $global:__AwshEnterOwner = (Get-PSReadLineKeyHandler -Bound -ErrorAction SilentlyContinue |
+            Where-Object { $_.Key -eq 'Enter' } | Select-Object -First 1).Function
+    }
+    # Another tool already owns Enter: leave it. Same rule as the hook above.
+    if ($global:__AwshEnterOwner -eq 'AcceptLine') {
+        Set-PSReadLineKeyHandler -Key Enter -BriefDescription AwshOmniboxAcceptLine -ScriptBlock {
+            $line = $null; $cursor = $null
+            [Microsoft.PowerShell.PSConsoleReadLine]::GetBufferState([ref]$line, [ref]$cursor)
+            $take = $false
+            if ($env:AWSH_OMNIBOX -ne '0' -and $line -and
+                $line -notmatch '[$(){}\\[\\]|;=@"<>&]' -and
+                $line -notmatch '\\s-[A-Za-z]' -and
+                ($line.Trim() -split '\\s+').Count -ge 2) {
+                $tok = $null; $err = $null
+                [void][System.Management.Automation.Language.Parser]::ParseInput($line, [ref]$tok, [ref]$err)
+                $take = $err.Count -gt 0 -and -not ($err | Where-Object { $_.IncompleteInput })
+            }
+            if ($take) {
+                [Microsoft.PowerShell.PSConsoleReadLine]::AddToHistory($line)
+                $q = $line.Trim() -replace "'", "''"
+                [Microsoft.PowerShell.PSConsoleReadLine]::Replace(0, $line.Length, "awsh-ask '$q'")
+            }
+            [Microsoft.PowerShell.PSConsoleReadLine]::AcceptLine()
+        }
+    }
 }
 `;
 }
@@ -379,6 +430,13 @@ export function selfTest(): string[] {
   if (!ps.includes('CommandOrigin')) {
     failures.push('pwsh snippet lost the CommandOrigin guard — every Get-Command ' +
                   'probe in every script would reach the agent');
+  }
+  if (!ps.includes('IncompleteInput')) {
+    failures.push('pwsh snippet lost the IncompleteInput guard — the Enter handler would ' +
+                  'hijack every multi-line paste as a question');
+  }
+  if (!ps.includes("-eq 'AcceptLine'")) {
+    failures.push('pwsh snippet binds Enter without checking another tool owns it');
   }
   if (/PSCallStack.*-gt/.test(ps)) {
     failures.push('pwsh snippet reintroduced the call-stack depth guard, which was ' +

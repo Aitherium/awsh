@@ -267,9 +267,20 @@ if (-not $global:__AwshOmnibox) {
                 $line -notmatch '[$(){}\\[\\]|;=@"<>&]' -and
                 $line -notmatch '\\s-[A-Za-z]' -and
                 ($line.Trim() -split '\\s+').Count -ge 2) {
+                $words = $line.Trim() -split '\\s+'
                 $tok = $null; $err = $null
                 [void][System.Management.Automation.Language.Parser]::ParseInput($line, [ref]$tok, [ref]$err)
-                $take = $err.Count -gt 0 -and -not ($err | Where-Object { $_.IncompleteInput })
+                $soft = @($err | Where-Object { $_.IncompleteInput })
+                $take = ($err.Count -gt 0 -and $soft.Count -eq 0) -or
+                    # "don't you know": the only incomplete thing is a string opened
+                    # by an apostrophe BETWEEN LETTERS. Code opens a string after a
+                    # space or '=' ("Write-Host 'multi"), which stays a continuation.
+                    ($soft.Count -gt 0 -and $soft.Count -eq $err.Count -and
+                     -not ($soft | Where-Object { $_.ErrorId -ne 'TerminatorExpectedAtEndOfString' }) -and
+                     $line -notmatch "(^|[^A-Za-z])'" -and $line -notmatch "'([^A-Za-z]|$)") -or
+                    # "where is my car" parses as Where-Object with bare positional
+                    # words, which is always a runtime error without an operator.
+                    ($err.Count -eq 0 -and $words[0] -eq 'where' -and $words.Count -ge 3)
             }
             if ($take) {
                 [Microsoft.PowerShell.PSConsoleReadLine]::AddToHistory($line)

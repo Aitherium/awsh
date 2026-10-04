@@ -179,9 +179,13 @@ describe('emitted shell integrations', () => {
     const NL = String.fromCharCode(10);
     const code = s.split(NL).filter((l) => !l.trim().startsWith('#')).join(' ');
     assert.match(code, /Set-PSReadLineKeyHandler -Key Enter/);
-    assert.match(code, /-not \(\$err \| Where-Object \{ \$_\.IncompleteInput \}\)/,
+    assert.match(code, /\$soft = @\(\$err \| Where-Object \{ \$_\.IncompleteInput \}\)/);
+    assert.match(code, /\$err\.Count -gt 0 -and \$soft\.Count -eq 0/,
       'without the IncompleteInput guard every multi-line paste becomes a question');
     assert.match(code, /AcceptLine\(\)/, 'the handler must still accept the line');
+    // "don't you know" is IncompleteInput too; only a mid-word apostrophe is prose.
+    assert.match(code, /TerminatorExpectedAtEndOfString/);
+    assert.match(code, /\$words\[0\] -eq 'where'/, '"where is my car" runs Where-Object without this');
   });
 
   test('pwsh: keeps GetNewClosure (its absence fails SILENTLY as an empty query)', () => {

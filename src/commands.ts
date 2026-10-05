@@ -4986,18 +4986,58 @@ COMMANDS['resume'] = {
     //
     // The backend words are parsed by the wrapper, not here: one parser, so
     // `aither resume on deepseek` and `aither-resume on deepseek` cannot drift.
+    //
+    // THIS `__dirname` SHIM IS LOAD-BEARING — every sibling handler in this file
+    // has one (see the other resolve(__dirname, ...) sites) and this handler was
+    // the one that did not: the package is ESM, `__dirname` is a CJS global, so
+    // the shipped build died with "Error: __dirname is not defined" on EVERY
+    // /resume invocation (measured 2026-10-05, awsh 1.19.3 global install).
+    const __dirname = dirname(fileURLToPath(import.meta.url));
     const repoRoot = resolve(__dirname, '..', '..', '..', '..', '..');
     const cli = join(repoRoot, '.PRODUCTS', '.AITHERRESUME', 'bin', 'aither-resume.ps1');
-    if (!existsSync(cli)) {
-      console.log(chalk.red(`  AitherResume not found at ${cli}`));
-      console.log(chalk.dim('  It ships in this repo; nothing to install.'));
-      return;
-    }
     const passthrough = args.trim().length ? args.trim().split(/\s+/) : [];
-    const child = spawn('pwsh', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', cli, ...passthrough], {
-      cwd: repoRoot, stdio: 'inherit',
+    // Installed globally (`npm i -g @aitherium/awsh`), there is no monorepo around
+    // this dist and the 5-up path lands in the npm prefix — measured live. Fall
+    // back to the wrapper AitherResume's installer puts on PATH. Generic on
+    // purpose: this package is public, so no machine path is baked in (the same
+    // rule backend-command.ts documents).
+    const useRepo = existsSync(cli);
+    const child = useRepo
+      ? spawn('pwsh', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', cli, ...passthrough], {
+          cwd: repoRoot, stdio: 'inherit',
+        })
+      : process.platform === 'win32'
+        // The installer's wrapper is a .cmd on win32, so go through ComSpec explicitly.
+        // NOT shell:true — `spawn(cmd, args, {shell:true})` triggers Node's DEP0190
+        // (args are concatenated, not escaped) on every /resume; the ComSpec form is
+        // the documented safe shape and quotes each element itself.
+        ? spawn(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', 'aither-resume', ...passthrough], {
+            stdio: 'inherit',
+          })
+        : spawn('aither-resume', passthrough, { stdio: 'inherit' });
+    await new Promise<void>((res) => {
+      child.on('close', () => res());
+      child.on('error', () => {
+        console.log(chalk.red('  AitherResume not found — neither the monorepo copy nor an'));
+        console.log(chalk.dim('  `aither-resume` on PATH. Install it: pwsh -File .PRODUCTS/.AITHERRESUME/install.ps1'));
+        res();
+      });
     });
-    await new Promise<void>((res) => child.on('close', () => res()));
+  },
+};
+
+// ── /backend command ──
+COMMANDS['backend'] = {
+  description: 'Switch which LLM backend drives a Claude Code session (list|use|status)',
+  usage: '/backend <list|use|status> [profile]',
+  handler: async (_client, args) => {
+    // One implementation for every form — this verb, `aither backend` (main.ts)
+    // and the module's own tests all land in backend-command.ts, so the spellings
+    // cannot drift. Same rule as /resume.
+    const { runBackendCommand } = await import('./backend-command.js');
+    const words = args.trim().length ? args.trim().split(/\s+/) : ['help'];
+    const code = await runBackendCommand(words);
+    if (code !== 0) console.log(chalk.dim(`  backend exited ${code}`));
   },
 };
 

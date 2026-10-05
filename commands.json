@@ -236,6 +236,12 @@
       ]
     },
     {
+      "name": "backend",
+      "category": "shell",
+      "description": "Switch which LLM backend drives a Claude Code session (list|use|status)",
+      "aliases": []
+    },
+    {
       "name": "sandbox",
       "category": "core",
       "description": "Manage sandbox sessions (list, create, stop, exec)",

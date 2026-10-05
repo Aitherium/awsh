@@ -1056,6 +1056,19 @@ $rows | ForEach-Object { [Console]::Out.WriteLine("PATH=" + $_) }`;
     return;
   }
 
+  // `aither backend <list|use|status>` — switch which LLM backend drives a Claude
+  // Code session (deepseek/kimi-k3/anthropic), session-scoped. Intercepted before
+  // backend resolution for the same reason as `harness`/`room`/`decisions`: it
+  // SPAWNS claude itself and never talks to a chat backend, so waiting on one
+  // would make the switcher fail exactly when switching away from a dead backend
+  // is what you are here to do. The module (backend-command.ts) existed with
+  // tests since ed5e71af4 but nothing imported it — measured 2026-10-05.
+  if (args[0] && args[0].toLowerCase() === 'backend') {
+    const { runBackendCommand } = await import('./backend-command.js');
+    process.exitCode = await runBackendCommand(args.slice(1));
+    return;
+  }
+
   // `aither shop`, `aither license …` and `aither install <product>` — the desktop
   // products (Deep Research, Saga, Agent Home, Iris). Local-only (awdk licensing,
   // ~/.aither), so intercepted before backend resolution like `rc`. A bare

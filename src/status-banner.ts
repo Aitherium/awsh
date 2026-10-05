@@ -23,6 +23,7 @@ import type { ShellConfig } from './config.js';
 // two visual languages again (that drift is what made the shell read as dated).
 // TC is re-exported from theme for the remaining local rgb() chrome below.
 import { TC, accent, gradient } from './theme.js';
+import { spendBarSegment } from './spend-command.js';
 
 export interface WelcomeParams {
   host: string;
@@ -306,6 +307,9 @@ export interface StatusInfo {
    * that into a terminal banner would reproduce the landfill in the one place
    * the operator actually looks. */
   criticalActions?: { total: number; titles: string[] };
+  /** Cloud LLM spend, `$X.XX/24h` (+ `ds $B low`), from ~/.aither/spend-cache.json.
+   *  Absent when nothing was ever measured — never a zero nobody measured. */
+  spend?: { text: string; low: boolean };
 }
 
 const ROLE_ORDER = ['orchestrator', 'reasoning', 'perception', 'embeddings', 'fast-context', 'cloud', 'llm'];
@@ -461,6 +465,12 @@ export async function gatherStatus(client: GenesisClient, config: ShellConfig): 
     info.poolTotal = snapshot.pool.total_slots ?? snapshot.pool.total;
   }
 
+  // Reads a cache file; a stale cache is refreshed in the BACKGROUND for the next paint.
+  try {
+    const spend = spendBarSegment();
+    if (spend.text) info.spend = spend;
+  } catch { /* spend is best-effort; the bar never dies over it */ }
+
   return info;
 }
 
@@ -508,6 +518,12 @@ export function formatStatusBar(info: StatusInfo): BarSegment[] {
     push('fabric', glyphC, '■',
       down ? chalk.yellow(`${up}/${total}`) : chalk.green(`${up}/${total}`),
       `${up}/${total}`);
+  }
+
+  // spend — cloud LLM $ over 24h; amber when the DeepSeek balance is low (click → /spend)
+  if (info.spend?.text) {
+    const paint = info.spend.low ? chalk.yellow : chalk.dim;
+    push('spend', paint('◎'), '◎', paint(info.spend.text), info.spend.text);
   }
 
   // Aither — click or Ctrl+P to toggle the inline portrait (keep at end)

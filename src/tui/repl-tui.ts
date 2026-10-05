@@ -649,6 +649,7 @@ export async function startTuiRepl(client: GenesisClient, config: ShellConfig): 
       // node/models/fabric → pop the full detail in a viewer (NOT the chat pane) + refresh.
       if (key === 'brand') { void openPicker(); return; }
       if (key === 'portrait') { openOverlay('portrait'); return; }
+      if (key === 'spend') { void runCommand('/spend'); return; }
       if (lastStatusInfo) void surface.showViewer('⬢ FLEET STATUS', formatStatusLines(lastStatusInfo));
       refreshStatusBar();
     },

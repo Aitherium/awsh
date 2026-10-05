@@ -1073,6 +1073,12 @@ $rows | ForEach-Object { [Console]::Out.WriteLine("PATH=" + $_) }`;
     process.exitCode = await runWalletCommand(args.slice(1));
     return;
   }
+  // `aither spend [24h|7d|30d] [--json]` -- cloud LLM spend (gateway cloud_spend tool).
+  if (args[0] && args[0].toLowerCase() === 'spend') {
+    const { runSpendCommand } = await import('./spend-command.js');
+    process.exitCode = await runSpendCommand(args.slice(1));
+    return;
+  }
   if (args[0] && ['shop', 'license'].includes(args[0].toLowerCase())) {
     const { runShopCommand, runLicenseCommand } = await import('./shop-command.js');
     process.exitCode = args[0].toLowerCase() === 'shop'

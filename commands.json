@@ -266,6 +266,12 @@
       "aliases": []
     },
     {
+      "name": "spend",
+      "category": "ops",
+      "description": "Cloud LLM spend: totals, per provider/model, top callers, DeepSeek balance",
+      "aliases": []
+    },
+    {
       "name": "storage",
       "category": "core",
       "description": "Storage: nodes, inventory, diff, proposals, ledger, policy, find, dupes, tree, share",

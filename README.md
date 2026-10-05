@@ -68,6 +68,7 @@ completes them.
 |---|---|
 | `/models` `/pool` `/compute` `/node` | what is serving you, and on whose hardware |
 | `/fleet` `/docker` `/deploy` `/routines` | the machines and what runs on them |
+| `/spend` | cloud LLM spend: `/spend 7d` totals, per provider/model, top callers, DeepSeek balance; the status bar shows `$X.XX/24h` |
 | `/ops` `/backups` `/backup` | the platform control plane: `aither ops backups verify` is a dry run; `--apply` starts it, `--agent genesis` hands it to Genesis |
 | `/codegraph` `/repowise` `/explore` `/review` | the code you are standing in |
 | `/memory` `/context` `/ingest` `/research` | what it knows and what you gave it |

@@ -8707,6 +8707,19 @@ COMMANDS['command'] = {
 };
 COMMANDS['do'] = COMMANDS['command'];
 
+// `/spend [24h|7d|30d] [--json]` — cloud LLM spend (DeepSeek and kin): totals, per
+// provider/model, top callers, DeepSeek balance. Asks the gateway's `cloud_spend` tool;
+// the logic lives in spend-command.ts (shared with `aither spend` in main.ts and the
+// status-bar segment) and is pinned by test/spend-command.test.ts.
+COMMANDS['spend'] = {
+  description: 'Cloud LLM spend: totals, per provider/model, top callers, DeepSeek balance',
+  usage: '/spend [24h|7d|30d] [--json]',
+  handler: async (_client: GenesisClient, args: string) => {
+    const { runSpendCommand } = await import('./spend-command.js');
+    await runSpendCommand(args.trim() ? args.trim().split(/\s+/) : []);
+  },
+};
+
 export function getCommand(name: string): Command | undefined {
   const lower = name.toLowerCase();
   const own = (k: string) => Object.prototype.hasOwnProperty.call(COMMANDS, k);

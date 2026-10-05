@@ -18,6 +18,8 @@ import { existsSync } from 'fs';
 import { resolveActingIdentity } from './auth.js';
 import { isPrivateHost, relaxTlsForPrivateTrustDomain } from './tls-trust.js';
 import { join, basename } from 'path';
+import { tmpdir } from 'os';
+import { spawnSync } from 'child_process';
 const _caChainPaths = [
   join(process.env.HOME || process.env.USERPROFILE || '', '.aither', 'tls', 'ca-chain.pem'),
   join(process.env.AITHEROS_ROOT || '', 'Library', 'Data', 'tls', 'ca-chain.pem'),
@@ -101,13 +103,14 @@ import { VERSION as SHELL_VERSION } from './version.js';
 import type { ShellConfig } from './config.js';
 import { loadConfig, setActiveConfig, deepseekProvider, kimiProvider, DEFAULT_AGENT} from './config.js';
 import { resolveBackend } from './backend-resolver.js';
-import { GenesisClient } from './client.js';
+import { GenesisClient, VISION_MODEL } from './client.js';
 import { renderBanner, createStreamRenderer } from './renderer.js';
 import { buildProbes, discoverLocalServices, probeHealth, pickServingModel } from './status-banner.js';
 import { startRepl } from './repl.js';
 import { installCrashReporter, setCurrentCommand } from './crash-reporter.js';
 import { installCredentialGuard } from './credential-guard.js';
 import { collectPositional } from './cli-args.js';
+import { isDeliberateQuestion, DELIBERATE_MODEL, DELIBERATE_FALLBACK, DECISION_FRAMING } from './omnibox.js';
 import {
   configureRemoteSync, recordTurn, loadSession, loadRemoteSession,
   mostRecentSessionId, buildContextSummary,
@@ -174,6 +177,21 @@ installCredentialGuard();
  * (published), and src/main.ts -> cli/ (dev, run through tsx).
  */
 const VERSION = SHELL_VERSION;
+
+/**
+ * Save the clipboard's image to a temp PNG and return its path, or null.
+ * Windows only (the omnibox's home); PowerShell needs -STA for the clipboard.
+ */
+function clipboardImageToFile(): string | null {
+  if (process.platform !== 'win32') return null;
+  const out = join(tmpdir(), `awsh-clip-${process.pid}.png`);
+  const ps = 'Add-Type -AssemblyName System.Windows.Forms; ' +
+    '$i=[Windows.Forms.Clipboard]::GetImage(); ' +
+    `if ($i) { $i.Save('${out.replace(/'/g, "''")}', [System.Drawing.Imaging.ImageFormat]::Png); 'ok' }`;
+  const r = spawnSync('powershell.exe', ['-NoProfile', '-STA', '-Command', ps],
+                      { encoding: 'utf8', windowsHide: true, timeout: 8000 });
+  return r.status === 0 && String(r.stdout).includes('ok') && existsSync(out) ? out : null;
+}
 
 async function main() {
   const args = process.argv.slice(2);
@@ -671,6 +689,24 @@ $rows | ForEach-Object { [Console]::Out.WriteLine("PATH=" + $_) }`;
       // tool output itself, clickable, whatever the model chose to write.
       'Lead with what the results actually SAY - the specific stories, findings ' +
       'or values - never with a list of the sources you searched.';
+    // A practical DECISION ("should I drive or walk to the car wash?") goes to
+    // DELIBERATE_MODEL with DECISION_FRAMING (see omnibox.ts for the numbers).
+    // The orchestrator answered "walk, it's healthier" 6/6. Every other line
+    // stays on the ~1 s model.
+    // An image in the line (a file path, or "this screenshot" = the clipboard) goes
+    // to vision with the image attached; it is not a deliberate decision turn.
+    const { findImagePaths, wantsClipboardImage } = await import('./omnibox.js');
+    const shown = findImagePaths(line, (p) => existsSync(p));
+    if (!shown.length && wantsClipboardImage(line)) {
+      const grabbed = clipboardImageToFile();
+      if (grabbed) shown.push(grabbed);
+    }
+    for (const img of shown) args.push('--image', img);
+    if (shown.length) process.env.AWSH_OMNIBOX_IMAGE = '1';
+    if (!process.env.AWSH_OMNIBOX_IMAGE && isDeliberateQuestion(line)) {
+      process.env.AWSH_OMNIBOX_DELIBERATE = '1';
+      process.env.AWSH_OMNIBOX_FRAMING = DECISION_FRAMING;
+    }
     args.push(line);
   }
 
@@ -1029,6 +1065,12 @@ $rows | ForEach-Object { [Console]::Out.WriteLine("PATH=" + $_) }`;
   if (args[0] && args[0].toLowerCase() === 'awconnect') {
     const { runAwconnectCommand } = await import('./awconnect-command.js');
     process.exitCode = runAwconnectCommand(args.slice(1));
+    return;
+  }
+  // `aither wallet [--ledger N] [--json]` -- the Aitherium wallet (gateway /v1/wallet).
+  if (args[0] && ['wallet', 'balance'].includes(args[0].toLowerCase())) {
+    const { runWalletCommand } = await import('./wallet-command.js');
+    process.exitCode = await runWalletCommand(args.slice(1));
     return;
   }
   if (args[0] && ['shop', 'license'].includes(args[0].toLowerCase())) {
@@ -1505,7 +1547,15 @@ async function oneShotChat(
     // 0/3 -> 3/3 measurement that moved it.
     ...(process.env.AWSH_OMNIBOX_FRAMING
       ? { systemAdditions: [process.env.AWSH_OMNIBOX_FRAMING] } : {}),
+    ...(process.env.AWSH_OMNIBOX_DELIBERATE
+      ? { model: DELIBERATE_MODEL, fallbackModel: DELIBERATE_FALLBACK, thinking: true } : {}),
+    // An attached image needs the vision route: the configured default model is the
+    // text orchestrator, which 400s on an image part.
+    ...(config.imageAttachments?.length ? { model: VISION_MODEL } : {}),
   };
+  if (process.env.AWSH_OMNIBOX_DELIBERATE && fmt === 'text') {
+    process.stderr.write(chalk.dim('  thinking…\r'));
+  }
 
   // Collect answer/model/tools/tokens for recording + JSON output.
   let answer = '';
@@ -1593,7 +1643,11 @@ async function oneShotChat(
         const block = renderSources(parseSearchHits(searchOutput));
         if (block) process.stdout.write(String.fromCharCode(10) + block + String.fromCharCode(10));
       }
-      process.stdout.write(chalk.dim(`  ⬢ ${agent}  ·  ${((Date.now() - started) / 1000).toFixed(1)}s\n`));
+      // Name the model that ANSWERED when it differs from the agent: a decision
+      // routed to the deliberate model printed "aither-orchestrator" here, which
+      // read as the routing having done nothing.
+      const servedBy = model && model !== agent ? model : agent;
+      process.stdout.write(chalk.dim(`  ⬢ ${servedBy}  ·  ${((Date.now() - started) / 1000).toFixed(1)}s\n`));
     }
   } catch (err: any) {
     if (err.name === 'AbortError') return false;

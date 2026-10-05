@@ -44,7 +44,7 @@ import { createTuiScreen, type PickerItem, type TuiSurface } from './screen.js';
 import { createTuiRenderer } from './controller.js';
 import { haltMessage } from './queue-halt.js';
 import { AffectPoller } from './affect.js';
-import { VoiceController } from './voice.js';
+import { VoiceController, isCustomVoice, listCustomVoices, voiceListLines } from './voice.js';
 import { resolveServiceEndpoint } from './service-endpoint.js';
 import { buildAffectPanel } from './aithersense-panel.js';
 import { buildFlameGraph } from './flame-graph-overlay.js';
@@ -204,7 +204,7 @@ export async function startTuiRepl(client: GenesisClient, config: ShellConfig): 
   const voiceEp = resolveServiceEndpoint(config, 'voice');
   const affectPoller = new AffectPoller({ baseUrl: affectEp.baseUrl, headers: affectEp.headers });
   affectPoller.start();
-  const voice = new VoiceController({ baseUrl: voiceEp.baseUrl, fallbackUrl: voiceEp.fallbackUrl, headers: voiceEp.headers });
+  const voice = new VoiceController({ baseUrl: voiceEp.baseUrl, fallbackUrl: voiceEp.fallbackUrl, headers: voiceEp.headers, genesis: client });
   // Drive the desktop overlay's mouth from the SAME amplitude envelope the docked pane
   // uses, so the two avatars never disagree. Without this Persona only ever saw the coarse
   // speaking/idle state and flapped on a generic loop while real speech played.
@@ -432,7 +432,7 @@ export async function startTuiRepl(client: GenesisClient, config: ShellConfig): 
   }
 
   /**
-   * /voice [on|off|status|speed <0.25–4>|faster|slower|<voice-name>]
+   * /voice [on|off|status|list|speed <0.25–4>|faster|slower|<voice-name>|custom:<name>]
    * Toggle speaking answers aloud via AitherVoice + tune how fast she talks.
    * Speed and voice persist across sessions (~/.aither/config.json).
    */
@@ -441,6 +441,10 @@ export async function startTuiRepl(client: GenesisClient, config: ShellConfig): 
     const a = (parts[0] || '').toLowerCase();
     if (a === 'off') { voice.disable(); surface.outputLine(chalk.dim('  voice off')); return; }
     if (a === 'status' || a === 'settings') { surface.outputLine(voiceSettingsLine()); return; }
+    if (a === 'list' || a === 'voices') {
+      for (const line of voiceListLines(await listCustomVoices(client))) surface.outputLine(chalk.dim(line));
+      return;
+    }
     if (a === 'speed' || a === 'rate') {
       const n = parseFloat(parts[1] || '');
       if (!isFinite(n)) {
@@ -458,11 +462,14 @@ export async function startTuiRepl(client: GenesisClient, config: ShellConfig): 
       return;
     }
     if (a && a !== 'on') { voice.setVoice(parts[0]); saveVoiceSettings(); }   // /voice <name> selects a voice + enables
-    surface.setStatus('checking AitherVoice…');
+    const custom = isCustomVoice(voice.getVoice());
+    surface.setStatus(custom ? 'checking custom voice…' : 'checking AitherVoice…');
     const ok = await voice.available();
     idleStatus();
     if (!ok) {
-      surface.outputLine(chalk.yellow(`  voice unavailable — AitherVoice not reachable at ${voiceEp.baseUrl}`));
+      surface.outputLine(chalk.yellow(custom
+        ? `  voice unavailable — ${voice.getVoice()} is not in this workspace ("/voice list" shows what is)`
+        : `  voice unavailable — AitherVoice not reachable at ${voiceEp.baseUrl}`));
       return;
     }
     voice.enable();

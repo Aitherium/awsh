@@ -193,3 +193,101 @@ describe('lip-sync timing', () => {
     assert.equal(typeof getLevel(), 'number');
   });
 });
+
+// ── Workspace custom voices (`custom:<name>`) via Genesis /voice-builds ───────
+// The live fleet has zero custom voices, so every test here uses a mocked Genesis client.
+import { synthesize, listCustomVoices, voiceListLines, isCustomVoice, customSayPath, customSayBody,
+         CUSTOM_SAY_TIMEOUT_MS, CUSTOM_SAY_MAX_CHARS, type GenesisVoiceClient } from '../src/tui/voice.js';
+
+function mockGenesis(reply: { say?: any; list?: any }) {
+  const calls: Array<{ method: string; path: string; body?: any; timeoutMs?: number }> = [];
+  const client: GenesisVoiceClient = {
+    async requestDetailed(method, path, body, timeoutMs) { calls.push({ method, path, body, timeoutMs }); return reply.say; },
+    async getDetailed(path) { calls.push({ method: 'GET', path }); return reply.list; },
+  };
+  return { client, calls };
+}
+
+describe('custom voices', () => {
+  const wav = Buffer.from('RIFFcustom', 'utf8');
+
+  test('custom:foo speaks through POST /voice-builds/voices/foo/say and never calls AitherVoice', async () => {
+    const { client, calls } = mockGenesis({ say: { audio_base64: wav.toString('base64'), format: 'wav', voice: 'custom:foo' } });
+    // baseUrl points at a port nothing listens on: a stock-path call would fail the test.
+    const r = await synthesize('hello', { voice: 'custom:foo', speed: 1.5, genesis: client, baseUrl: 'https://127.0.0.1:9/voice' });
+    assert.equal(r.ok, true, r.error);
+    assert.deepEqual(readFileSync(r.path!), wav);
+    unlinkSync(r.path!);
+    assert.equal(calls.length, 1);
+    assert.deepEqual(calls[0], { method: 'POST', path: '/voice-builds/voices/foo/say', body: { text: 'hello', speed: 1.5 }, timeoutMs: CUSTOM_SAY_TIMEOUT_MS });
+  });
+
+  test('a Genesis error is reported, never silently re-voiced', async () => {
+    const { client } = mockGenesis({ say: { error: 'No such voice in this workspace', status: 404 } });
+    const r = await synthesize('hello', { voice: 'custom:ghost', genesis: client });
+    assert.equal(r.ok, false);
+    assert.match(r.error!, /custom voice: No such voice/);
+  });
+
+  test('custom voice without a Genesis client fails cleanly', async () => {
+    const r = await synthesize('hello', { voice: 'custom:dad' });
+    assert.equal(r.ok, false);
+    assert.match(r.error!, /Genesis connection/);
+  });
+
+  test('a stock voice never touches Genesis', async () => {
+    const { client, calls } = mockGenesis({ say: { audio_base64: wav.toString('base64') } });
+    const r = await synthesize('hello', { voice: 'nova', genesis: client, baseUrl: 'https://127.0.0.1:9/voice' });
+    assert.equal(r.ok, false);         // stock path tried the (unreachable) AitherVoice URL
+    assert.equal(calls.length, 0);
+  });
+
+  test('names with spaces or a slash are URL-encoded', () => {
+    assert.equal(customSayPath('custom:grandpa joe'), '/voice-builds/voices/grandpa%20joe/say');
+    assert.equal(customSayPath('custom:a/b'), '/voice-builds/voices/a%2Fb/say');
+    assert.equal(isCustomVoice('custom:'), false);
+    assert.equal(isCustomVoice('nova'), false);
+    assert.equal(isCustomVoice('custom:dad'), true);
+  });
+
+  test('listCustomVoices maps names to custom:<name>; empty/error -> []', async () => {
+    assert.deepEqual(await listCustomVoices(mockGenesis({ list: { voices: [] } }).client), []);
+    assert.deepEqual(await listCustomVoices(mockGenesis({ list: { error: 'Not Found', status: 404 } }).client), []);
+    assert.deepEqual(await listCustomVoices(undefined), []);
+    const { client, calls } = mockGenesis({ list: { voices: [{ id: 'v1', name: 'dad', reader: 'r', language: 'en', built_at: 1, gate: {} }] } });
+    assert.deepEqual(await listCustomVoices(client), ['custom:dad']);
+    assert.deepEqual(calls, [{ method: 'GET', path: '/voice-builds/voices' }]);
+  });
+
+  test('/voice list renders stock names and the empty-workspace line', () => {
+    const empty = voiceListLines([]);
+    assert.match(empty[0], /nova, alloy, echo, fable, onyx, shimmer/);
+    assert.equal(empty[1], '  (no custom voices in this workspace)');
+    assert.deepEqual(voiceListLines(['custom:dad']).slice(1), ['  custom: custom:dad']);
+  });
+
+  test('custom say body fits the Genesis SayRequest bounds (text <= 1000, speed 0.5..2.0)', async () => {
+    // The TUI sends up to 1600 chars and speeds up to 4x; Genesis would 422 both.
+    const long = 'word '.repeat(400);                     // 2000 chars
+    const b = customSayBody(long, 3.5);
+    assert.ok(b.text.length <= CUSTOM_SAY_MAX_CHARS && b.text.length > 800, String(b.text.length));
+    assert.ok(!b.text.endsWith(' '));
+    assert.equal(b.speed, 2.0);
+    assert.equal(customSayBody('hi', 0.25).speed, 0.5);
+    assert.equal(customSayBody('hi', undefined).speed, 1.0);
+    assert.deepEqual(customSayBody('hi', 1.25), { text: 'hi', speed: 1.25 });
+    const { client, calls } = mockGenesis({ say: { audio_base64: wav.toString('base64'), format: 'wav' } });
+    const r = await synthesize(long, { voice: 'custom:foo', speed: 4, genesis: client });
+    assert.equal(r.ok, true, r.error);
+    unlinkSync(r.path!);
+    assert.ok(calls[0].body.text.length <= CUSTOM_SAY_MAX_CHARS);
+    assert.equal(calls[0].body.speed, 2.0);
+  });
+
+  test('VoiceController.available() for a custom voice checks the workspace list, not AitherVoice', async () => {
+    const present = new VoiceController({ voice: 'custom:dad', genesis: mockGenesis({ list: { voices: [{ name: 'dad' }] } }).client });
+    assert.equal(await present.available(), true);
+    const absent = new VoiceController({ voice: 'custom:mom', genesis: mockGenesis({ list: { voices: [] } }).client });
+    assert.equal(await absent.available(), false);
+  });
+});

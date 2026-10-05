@@ -198,6 +198,12 @@ export interface StreamChatOpts {
   /** Set true to send this turn WITHOUT the shell situation block (tests,
    *  or a caller that already supplied its own). Default: attached. */
   noSituation?: boolean;
+  /** Ask the backend to reason before answering (`metadata.enable_thinking`).
+   *  The MicroScheduler honours it; a backend that does not simply ignores it. */
+  thinking?: boolean;
+  /** Model to retry with ONCE when the gateway refuses `model` (400 unknown on
+   *  an older gateway, 403 below its tier). Not used on any other failure. */
+  fallbackModel?: string;
   /** Explicit LLM role for provider selection: orchestrator (fast/cheap),
    *  reasoning (slow/expensive), perception (vision/multimodal). When set,
    *  uses the role-specific provider config if available. */
@@ -217,6 +223,23 @@ export interface BackendInfo {
   /** Backend serves the genesis-compatible agent pipeline at /chat/stream
    *  (ADK daemon does; the edge gateway — also typed 'adk' — does not). */
   hasAgentStream?: boolean;
+}
+
+/** OpenAI chat content part (text or image). */
+export type ContentPart =
+  | { type: 'text'; text: string }
+  | { type: 'image_url'; image_url: { url: string } };
+
+/** The gateway route that reads images. */
+export const VISION_MODEL = 'aither-vision';
+
+/** A user message's content: plain text, or text plus one image part per data URL. */
+export function userContent(message: string, attachments?: string[]): string | ContentPart[] {
+  if (!attachments?.length) return message;
+  return [
+    { type: 'text', text: message },
+    ...attachments.map((url): ContentPart => ({ type: 'image_url', image_url: { url } })),
+  ];
 }
 
 export class GenesisClient {
@@ -1095,7 +1118,7 @@ export class GenesisClient {
     opts: StreamChatOpts,
     optionalRoleProvider?: ProviderOverride,
   ): AsyncGenerator<SSEEvent> {
-    const messages: Array<{ role: string; content: string }> = [];
+    const messages: Array<{ role: string; content: string | ContentPart[] }> = [];
     // A loaded pack is the FIRST system message. The genesis path carries persona
     // as a field; this bare OpenAI path has no such concept, so without this the
     // pack would change nothing here and `awsh gobbonet` would be a banner over
@@ -1112,14 +1135,30 @@ export class GenesisClient {
       const sit = buildSituation();
       if (sit) messages.push({ role: 'system', content: sit });
     }
-    messages.push({ role: 'user', content: message });
+    // Images ride as OpenAI content parts. Until 2026-10-04 this path sent the text
+    // ONLY -- `awsh ask --image shot.png "what is this"` reached the model without the
+    // image, and only the genesis path carried `attachments` at all.
+    messages.push({ role: 'user', content: userContent(message, opts.attachments) });
+    // ONE system message. Gemma-style chat templates (llama.cpp's Bonsai-2, the vision
+    // fallback) accept a single leading system turn: measured 2026-10-04, the same image
+    // request 502'd with the shell's two system blocks and answered with them joined.
+    const sys = messages.filter((m) => m.role === 'system').map((m) => m.content as string);
+    if (sys.length > 1) {
+      const rest = messages.filter((m) => m.role !== 'system');
+      messages.length = 0;
+      messages.push({ role: 'system', content: sys.join('\n\n') }, ...rest);
+    }
 
     // A direct provider override (DeepSeek etc) takes precedence: use ITS model,
     // endpoint, and API key — bypassing the AitherOS token/headers entirely.
     // Per-role providers (e.g., reasoning → DeepSeek R1) come second; default config last.
     const provider = optionalRoleProvider || getActiveConfig()?.provider;
     const model = provider?.model
-      || opts.model || this._backend?.agent
+      || opts.model
+      // An image turn with no explicit model goes to the vision route: the agent
+      // default is the text orchestrator, which 400s on an image part.
+      || (opts.attachments?.length ? VISION_MODEL : undefined)
+      || this._backend?.agent
       // NOT `name` when detection failed: detectBackend() returns the SENTINEL
       // {type:'unknown', name:'offline'} after a health timeout, and using that
       // as a model id sends `"model":"offline"` -- a name no backend serves, so
@@ -1127,7 +1166,19 @@ export class GenesisClient {
       // absence of an answer, not an answer.
       || (this._backend && this._backend.type !== 'unknown' ? this._backend.name : undefined)
       || DEFAULT_AGENT;
-    const body = { model, messages, stream: true };
+    // A THINKING turn goes non-streamed. Measured 2026-10-03 on :8182, same body
+    // but the stream flag: aither-coding + enable_thinking answered "drive - the
+    // car needs to be washed" after 59 s non-streamed, and streamed it answered
+    // the orchestrator's "walk if it's short" in 0.3 s with no reasoning at all.
+    // The scheduler's stream path does not reach the requested backend with
+    // thinking, so a streamed thinking turn is a fast wrong answer.
+    const body = {
+      // An image turn goes non-streamed too: measured 2026-10-04 on :8182 the same
+      // aither-vision request answered "CAR WASH 42, red square" with stream:false
+      // and {"error": "HTTP 400"} with stream:true (the scheduler's stream path).
+      model, messages, stream: !opts.thinking && !opts.attachments?.length,
+      ...(opts.thinking ? { metadata: { enable_thinking: true } } : {}),
+    };
 
     // Prefer the provider's endpoint, then the configured raw-inference endpoint
     // (gateway /v1 or MicroScheduler), so 'raw' mode reaches the model even when
@@ -1152,6 +1203,11 @@ export class GenesisClient {
       });
     } catch (err: any) {
       throw new Error(`Cannot connect to inference endpoint (${completionsUrl}): ${err.message}`);
+    }
+    if (!response.ok && (response.status === 400 || response.status === 403) &&
+        !provider && opts.fallbackModel && opts.fallbackModel !== model) {
+      yield* this._streamOpenAI(message, { ...opts, model: opts.fallbackModel, fallbackModel: undefined });
+      return;
     }
     if (!response.ok) {
       const text = await response.text().catch(() => '');
@@ -1248,6 +1304,19 @@ export class GenesisClient {
         }
       }
       throw new Error(`Inference failed: HTTP ${response.status} ${text.slice(0, 200)}`);
+    }
+
+    if (!body.stream) {
+      const started = Date.now();
+      const json: any = await response.json().catch(() => null);
+      const raw = String(json?.choices?.[0]?.message?.content ?? '');
+      if (!raw.trim()) throw new Error('Inference returned no answer');
+      const stripped = raw.replace(/<think(?:ing)?>[\s\S]*?<\/think(?:ing)?>/gi, '').trim();
+      const served = String(json?.model || model);
+      yield { type: 'session_start', data: { type: 'session_start', agent: this._backend?.agent || opts.agent || 'agent', model: served } };
+      yield { type: 'token', data: { type: 'token', t: stripped || raw } };
+      yield { type: 'complete', data: { type: 'complete', model: served, duration_ms: Date.now() - started, eager: false } };
+      return;
     }
 
     // Guard the silent-no-op: a 200 that's an HTML page (e.g. a "coming soon"

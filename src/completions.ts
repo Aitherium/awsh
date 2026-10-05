@@ -538,7 +538,7 @@ export const SUBCOMMAND_DEFS: Record<string, [string, string][]> = {
   '/deploy': [['<service_name>', '']],
   '/repowise': [['<question>', '']],
   '/listen': [['[seconds]', '[--to <session>]']],
-  '/speak': [['<text>', '[--voice <name>]']],
+  '/speak': [['<text>', '[--voice <name>|custom:<name>]']],
   '/ingest': [['<url-or-file>', '[--agent <NAME>] [--workspace <ID>]']],
   '/inbox': [['[agent_name]', '']],
   '/approve': [['<username>', '']],

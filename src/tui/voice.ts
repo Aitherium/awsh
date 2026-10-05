@@ -27,6 +27,78 @@ export interface VoiceOptions {
   voice?: string;                     // nova|alloy|echo|fable|onyx|shimmer (default nova)
   format?: string;                    // wav|mp3|opus|… (default wav — most reliable for local playback)
   speed?: number;                     // 0.25..4.0
+  /** Genesis client for workspace custom voices (`custom:<name>`). Unset = stock voices only. */
+  genesis?: GenesisVoiceClient;
+}
+
+/**
+ * The slice of GenesisClient the custom-voice path needs (structural, so this module does
+ * not import client.ts and tests can pass a plain mock). Both methods resolve to the parsed
+ * JSON on success or `{ error, status }` on failure -- they never throw.
+ */
+export interface GenesisVoiceClient {
+  requestDetailed(method: 'GET' | 'POST', path: string, body?: Record<string, any>, timeoutMs?: number): Promise<any>;
+  getDetailed(path: string): Promise<any>;
+}
+
+/** Workspace custom voices built through Genesis /voice-builds use the id `custom:<name>`. */
+export const CUSTOM_VOICE_PREFIX = 'custom:';
+export const isCustomVoice = (v: string | undefined | null): boolean =>
+  typeof v === 'string' && v.startsWith(CUSTOM_VOICE_PREFIX) && v.length > CUSTOM_VOICE_PREFIX.length;
+export const customVoiceName = (v: string): string => v.slice(CUSTOM_VOICE_PREFIX.length);
+/** The stock AitherVoice names (what `/voice list` prints before any custom ones). */
+export const STOCK_VOICES = ['nova', 'alloy', 'echo', 'fable', 'onyx', 'shimmer'] as const;
+
+/** The `/voice list` body (pure -- unit-tested): stock names, then the workspace's custom ids. */
+export function voiceListLines(custom: string[]): string[] {
+  const lines = [`  stock: ${STOCK_VOICES.join(', ')}`];
+  if (custom.length) lines.push(`  custom: ${custom.join(', ')}`);
+  else lines.push('  (no custom voices in this workspace)');
+  return lines;
+}
+
+/**
+ * Genesis says a custom voice in up to 60 s (the first call uploads the model to the voice
+ * plane), so the client waits a little longer than that.
+ */
+export const CUSTOM_SAY_TIMEOUT_MS = 65000;
+
+/**
+ * Genesis SayRequest bounds (routers/voice_builds.py): text 1..1000 chars, speed 0.5..2.0.
+ * The TUI sends up to 1600 chars and speeds 0.25..4, which Genesis would reject with 422,
+ * so the custom path fits the request to the contract (pure -- unit-tested).
+ */
+export const CUSTOM_SAY_MAX_CHARS = 1000;
+export function customSayBody(text: string, speed: number | undefined): { text: string; speed: number } {
+  let t = text.trim();
+  if (t.length > CUSTOM_SAY_MAX_CHARS) {
+    t = t.slice(0, CUSTOM_SAY_MAX_CHARS);
+    const cut = t.lastIndexOf(' ');
+    if (cut > CUSTOM_SAY_MAX_CHARS * 0.8) t = t.slice(0, cut);
+  }
+  const s = typeof speed === 'number' && Number.isFinite(speed) ? speed : 1.0;
+  return { text: t, speed: Math.min(2.0, Math.max(0.5, s)) };
+}
+
+/** The Genesis path that speaks with a custom voice (pure -- unit-tested). */
+export function customSayPath(voice: string): string {
+  return `/voice-builds/voices/${encodeURIComponent(customVoiceName(voice))}/say`;
+}
+
+/**
+ * The caller's workspace custom voices as `custom:<name>` ids. An empty workspace, an
+ * unreachable Genesis or an older Genesis without /voice-builds all give [] -- callers
+ * render "no custom voices" rather than an error.
+ */
+export async function listCustomVoices(client: GenesisVoiceClient | undefined): Promise<string[]> {
+  if (!client) return [];
+  try {
+    const r = await client.getDetailed('/voice-builds/voices');
+    if (!r || r.error || !Array.isArray(r.voices)) return [];
+    return r.voices
+      .map((v: any) => (typeof v?.name === 'string' && v.name ? `${CUSTOM_VOICE_PREFIX}${v.name}` : ''))
+      .filter(Boolean);
+  } catch { return []; }
 }
 
 const DEFAULTS = { baseUrl: 'https://127.0.0.1:8084/voice', voice: 'nova', format: 'wav', speed: 1.0 };
@@ -124,6 +196,7 @@ async function httpJson(url: string, body: unknown, headers: Record<string, stri
 
 /** Synthesise `text` → a temp audio file path (try primary, fallback to secondary, HTTPS first, HTTP fallback). */
 export async function synthesize(text: string, opts: VoiceOptions = {}): Promise<{ ok: boolean; path?: string; format?: string; durationS?: number; error?: string }> {
+  if (isCustomVoice(opts.voice)) return synthesizeCustom(text, opts.voice as string, opts);
   const base = (opts.baseUrl ?? DEFAULTS.baseUrl).replace(/\/+$/, '');
   const fallback = opts.fallbackUrl?.replace(/\/+$/, '') || '';
   const headers = opts.headers ?? {};
@@ -161,6 +234,11 @@ export async function synthesize(text: string, opts: VoiceOptions = {}): Promise
       return { ok: false, error: `voice unreachable: ${e?.message || e}` };
     }
   }
+  return writeSynthesis(json);
+}
+
+/** Decode a synthesis reply and write it to a temp audio file. */
+function writeSynthesis(json: any): { ok: boolean; path?: string; format?: string; durationS?: number; error?: string } {
   const parsed = parseSynthesisResult(json);
   if (!parsed.ok || !parsed.audio) return { ok: false, error: parsed.error };
   const dir = join(tmpdir(), 'aither-voice');
@@ -168,6 +246,24 @@ export async function synthesize(text: string, opts: VoiceOptions = {}): Promise
   const file = join(dir, `speak_${process.pid}_${(json.duration_seconds || 0)}.${parsed.format || 'wav'}`);
   writeFileSync(file, parsed.audio);
   return { ok: true, path: file, format: parsed.format, durationS: Number(json.duration_seconds) || undefined };
+}
+
+/**
+ * Speak with a workspace custom voice through Genesis
+ * (POST /voice-builds/voices/<name>/say {text, speed} -> {audio_base64, format, voice}).
+ * Never falls back to a stock voice: a failure is reported, not silently re-voiced.
+ */
+async function synthesizeCustom(text: string, voice: string, opts: VoiceOptions): Promise<{ ok: boolean; path?: string; format?: string; durationS?: number; error?: string }> {
+  if (!opts.genesis) return { ok: false, error: 'custom voices need a Genesis connection' };
+  let json: any;
+  try {
+    json = await opts.genesis.requestDetailed('POST', customSayPath(voice),
+      customSayBody(text, opts.speed), CUSTOM_SAY_TIMEOUT_MS);
+  } catch (e: any) {
+    return { ok: false, error: `custom voice: ${e?.message || e}` };
+  }
+  if (!json || json.error) return { ok: false, error: `custom voice: ${json?.error || 'no reply'}` };
+  return writeSynthesis(json);
 }
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
@@ -369,6 +465,11 @@ export class VoiceController {
 
   /** Health probe against the configured base, fallback, and HTTP variants. */
   async available(): Promise<boolean> {
+    // A custom voice is spoken by Genesis, not AitherVoice: it is available when the
+    // caller's workspace lists it.
+    if (isCustomVoice(this.opts.voice)) {
+      return (await listCustomVoices(this.opts.genesis)).includes(this.opts.voice as string);
+    }
     const base = (this.opts.baseUrl ?? DEFAULTS.baseUrl).replace(/\/+$/, '');
     const fallback = (this.opts.fallbackUrl ?? '').replace(/\/+$/, '') || '';
     const urls = [];

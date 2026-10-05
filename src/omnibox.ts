@@ -334,6 +334,79 @@ ${fn}() {
 `;
 }
 
+/**
+ * The model a practical decision is routed to, and the one used when the caller
+ * cannot reach it. Measured 2026-10-03 on the car-wash prompts: DeepSeek V4 Flash
+ * over the API 4/4 in ~2 s; the gateway's local reasoning route right but 5-60 s.
+ * aither-deepseek is a PLATFORM-tier gateway route, so customers get a 403 and
+ * fall back to the pool.
+ */
+export const DELIBERATE_MODEL = 'aither-deepseek';
+export const DELIBERATE_FALLBACK = 'aither-reasoning';
+
+/**
+ * The omnibox framing for a decision. The shell framing ("typed at a shell prompt
+ * where a command was expected") made the model role-play a shell -- measured
+ * replies opening "bash: should: command not found". The constraint sentence is
+ * the one that took the pool from 7/12 to 11/12; it carries no worked example,
+ * because one ("walking leaves the car at home") was parroted into the bike
+ * answer as "riding your bike leaves it at home".
+ */
+export const DECISION_FRAMING =
+  'The user asked a practical question at their terminal. Answer in one to three ' +
+  'plain lines, no markdown headers, no preamble. Before answering, work out what ' +
+  'has to physically be where for the user\'s goal to happen, and reject any option ' +
+  'that leaves something required behind. Lead with the option that achieves the goal.';
+
+/**
+ * Is this line a practical DECISION worth a slower, reasoned answer?
+ *
+ * "should I drive or walk to the car wash?" needs the model to notice what has
+ * to physically be where; the fast orchestrator never did (0/6, measured
+ * 2026-10-03), the reasoning model with thinking did. Narrow on purpose: only
+ * "should/can/could/would I ...", "how can/do/would I ...", "is it better ..."
+ * and "X or Y?" questions pay the 7-60 s wait. Lookups, typos and chat stay fast.
+ */
+export function isDeliberateQuestion(line: string): boolean {
+  const q = line.trim().toLowerCase();
+  if (q.split(/\s+/).length < 4) return false;
+  if (/^(should|can|could|would|shall|must)\s+(i|we)\b/.test(q)) return true;
+  if (/^how\s+(can|do|would|should|could)\s+(i|we)\b/.test(q)) return true;
+  if (/^(is|would)\s+it\s+(better|smarter|worth|possible|ok|okay)\b/.test(q)) return true;
+  if (/\bor\b/.test(q) && /\?\s*$/.test(q) && /\b(i|we|my|our)\b/.test(q)) return true;
+  return false;
+}
+
+const IMAGE_EXT = /\.(png|jpe?g|gif|webp|bmp)$/i;
+
+/**
+ * Image files a typed line names, in order, deduplicated -- only ones that exist.
+ *
+ * Until 2026-10-04 an omnibox line could not carry an image at all: "what is in
+ * C:\shots\error.png" sent the PATH as text and the model guessed. A token counts
+ * when it ends in an image extension and `exists` says the file is there; quotes
+ * around it are stripped, so a quoted path with spaces works too.
+ */
+export function findImagePaths(line: string, exists: (p: string) => boolean): string[] {
+  const out: string[] = [];
+  const quoted = line.match(/"[^"]+"|'[^']+'/g) || [];
+  const tokens = [...quoted.map((q) => q.slice(1, -1)), ...line.split(/\s+/)];
+  for (const raw of tokens) {
+    const t = raw.replace(/^["'(]+|["'),.?!]+$/g, '');
+    if (IMAGE_EXT.test(t) && !out.includes(t) && exists(t)) out.push(t);
+  }
+  return out;
+}
+
+/**
+ * Does the line ask about the image on the clipboard? A terminal cannot paste an
+ * image, so "what's in this screenshot" after Win+Shift+S means the clipboard.
+ */
+export function wantsClipboardImage(line: string): boolean {
+  return /\b(clipboard|screenshot|screen ?shot|snip|the image i (copied|pasted)|pasted image|copied image)\b/i
+    .test(line);
+}
+
 /** Emit the shell integration for `awsh init <shell>`. */
 export function omniboxInitScript(shell: InitShell): string {
   if (shell === 'pwsh' || shell === 'powershell') return pwshSnippet();

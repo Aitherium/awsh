@@ -173,7 +173,9 @@ describe('a launched pack reaches the model', () => {
     assert.ok(Array.isArray(messages), 'the raw path sent no messages array');
     const systems = messages!.filter((m) => m.role === 'system');
     assert.ok(systems.length > 0, 'no system message was sent on the raw path');
-    assert.equal(systems[0].content, PACK_PROMPT,
+    // The shell joins its system blocks into ONE message (a Gemma-template backend 502s
+    // on two), so "first" means the joined message STARTS with the pack prompt.
+    assert.ok(systems[0].content.startsWith(PACK_PROMPT),
       'the pack prompt is not first, so anything ahead of it sets the persona');
   });
 });

@@ -91,6 +91,12 @@ in the place you were already typing. It composes with
 index) and [awbrowse](https://github.com/Aitherium/awbrowse) (a page it can
 actually read). None of them are required.
 
+## Community
+
+Questions, ideas and show-and-tell go on the project boards at
+https://app.aitherium.com/forum (the `awsh` board is this project's; reading needs no account).
+Bugs go to [GitHub issues](https://github.com/Aitherium/awsh/issues).
+
 ## Licence
 
 **BUSL-1.1.** Free to install, run and modify for your own use. It is not

@@ -265,6 +265,31 @@ async function main() {
     return;
   }
 
+  // ── Once-a-day update check (update-check.ts) ─────────────────────────
+  //
+  // Below `init` on purpose: that runs from a shell profile and stays
+  // network-free. This never waits on the network either -- it prints a
+  // cached notice (at most once a day, interactive stderr only) and refreshes
+  // the cache on an unref'd background request. AWSH_NO_UPDATE_CHECK=1 or
+  // offline turns it off.
+  if (process.stderr.isTTY) {
+    try {
+      const { checkForUpdate, currentInstallMethod, fetchLatest, updateCheckDisabled } = await import('./update-check.js');
+      const { shellIsOffline } = await import('./offline.js');
+      if (!updateCheckDisabled(process.env, shellIsOffline())) {
+        // Under bun (the compiled binary included) there is no `node -e` to
+        // detach the lookup into, so it runs in-process with a hard cap.
+        const underBun = (globalThis as { Bun?: unknown }).Bun !== undefined;
+        const { notice } = checkForUpdate({
+          current: VERSION,
+          method: currentInstallMethod(),
+          fetcher: underBun ? () => fetchLatest() : undefined,
+        });
+        if (notice) console.error(chalk.dim(`  ${notice}`));
+      }
+    } catch { /* an update check must never stop the shell */ }
+  }
+
   // ── `awsh setup` — make this machine work, and PROVE each step ──────────
   //
   // Written after a real install failed four different ways in sequence, every

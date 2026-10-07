@@ -1378,7 +1378,7 @@ const COMMANDS: Record<string, Command> = {
         connect: {
           name: 'Awconnect',
           type: 'Chrome extension',
-          note: 'Browser extension. Install from awconnect/ folder via chrome://extensions (Developer mode, Load unpacked).',
+          note: 'Browser extension. Install from the Chrome Web Store: https://chromewebstore.google.com/detail/awconnect/peeojgjhjficedkncdejbfnacooodbak -- or `aither awconnect install` for the developer (Load unpacked) build.',
         },
         shell: {
           name: 'AitherShell',

@@ -1,5 +1,5 @@
 /**
- * `aither awconnect [install|status|path] [flags…]` — the Awconnect browser
+ * `aither awconnect [install|status|path|pair] [flags…]` — the Awconnect browser
  * extension, from the terminal.
  *
  * A THIN shell-out to `python -m adk.cli awconnect …` (same pattern as
@@ -14,6 +14,9 @@
  *   aither awconnect install --update   refresh the folder in place
  *   aither awconnect status --json
  *   aither awconnect path
+ *   aither awconnect pair            pending pairing requests (the default)
+ *   aither awconnect pair approve <code>   approve the 6-digit code the extension shows
+ *   aither awconnect pair revoke     revoke every paired extension token
  *
  * Without awdk the answer is the one-line install, never a stack trace.
  */
@@ -26,7 +29,13 @@ function pythonExecutable(env: NodeJS.ProcessEnv): string {
   return env.AITHER_PYTHON || (process.platform === 'win32' ? 'python' : 'python3');
 }
 
-export const AWCONNECT_ACTIONS = ['install', 'status', 'path'] as const;
+export const AWCONNECT_ACTIONS = ['install', 'status', 'path', 'pair'] as const;
+/** `adk awconnect pair`'s own subcommands (its argparse choices). */
+export const AWCONNECT_PAIR_ACTIONS = ['pending', 'approve', 'revoke'] as const;
+
+/** The Chrome Web Store listing: the one-click install for everyone else. */
+export const AWCONNECT_WEBSTORE_URL =
+  'https://chromewebstore.google.com/detail/awconnect/peeojgjhjficedkncdejbfnacooodbak';
 
 export const AWDK_INSTALL_HINT = process.platform === 'win32'
   ? 'powershell -ExecutionPolicy ByPass -c "irm https://aitherium.com/install.ps1 | iex"'
@@ -41,6 +50,19 @@ export interface AwconnectDeps {
   adkReady?: () => boolean;
 }
 
+/** `pair`'s argv tail, or null. Stricter than the other verbs because this one
+ *  hands the daemon an OWNER approval: exactly `[pending|revoke]` or
+ *  `approve <6 digits>` (spaces/dashes in the code are dropped, as people copy
+ *  it as "123 456"), and nothing else -- no flag is forwarded. */
+function pairArgv(rest: string[]): string[] | null {
+  if (!rest.length) return ['pending'];
+  const sub = rest[0].toLowerCase();
+  if (!(AWCONNECT_PAIR_ACTIONS as readonly string[]).includes(sub)) return null;
+  if (sub !== 'approve') return rest.length === 1 ? [sub] : null;
+  const code = rest.slice(1).join('').replace(/[\s-]/g, '');
+  return /^\d{6}$/.test(code) ? ['approve', code] : null;
+}
+
 /** The exact argv handed to python. Unknown first words are refused, not forwarded. */
 export function buildAwconnectArgv(args: string[]): string[] | null {
   const rest = [...args];
@@ -49,6 +71,10 @@ export function buildAwconnectArgv(args: string[]): string[] | null {
     const word = rest.shift()!.toLowerCase();
     if (!(AWCONNECT_ACTIONS as readonly string[]).includes(word)) return null;
     action = word;
+  }
+  if (action === 'pair') {
+    const tail = pairArgv(rest);
+    return tail ? ['-m', 'adk.cli', 'awconnect', 'pair', ...tail] : null;
   }
   return ['-m', 'adk.cli', 'awconnect', action, ...rest];
 }
@@ -63,6 +89,12 @@ export function awconnectUsage(): string {
     '                                       folder path, then watch for the load',
     '  aither awconnect install --update    refresh the loaded folder in place',
     '  aither awconnect path                the folder to "Load unpacked"',
+    '  aither awconnect pair [pending]      pairing requests waiting for your approval',
+    '  aither awconnect pair approve <code> approve the 6-digit code the extension shows',
+    '  aither awconnect pair revoke         revoke every paired extension token',
+    '',
+    `  One-click install: ${AWCONNECT_WEBSTORE_URL}`,
+    '  (install stages the developer build for "Load unpacked")',
   ].join('\n');
 }
 

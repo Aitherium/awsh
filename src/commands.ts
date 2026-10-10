@@ -564,9 +564,13 @@ const COMMANDS: Record<string, Command> = {
     description: 'Show available commands',
     handler: async () => {
       console.log(chalk.bold('\n  Available Commands\n'));
-      const rows = Object.entries(COMMANDS)
-        .sort(([a], [b]) => a.localeCompare(b))
-        .map(([name, cmd]) => [chalk.cyan(`/${name}`), cmd.description]);
+      // One row per command; a second spelling is shown on its canonical row.
+      const rows = helpRows().map(({ name, aliases, description }) => [
+        chalk.cyan(`/${name}`) + (aliases.length
+          ? chalk.dim(` (alias: ${aliases.map((a) => `/${a}`).join(', ')})`)
+          : ''),
+        description,
+      ]);
       console.log(formatTable(['  Command', 'Description'], rows));
       console.log();
       console.log(chalk.dim('  Chat:   type a message to talk to the default agent'));
@@ -1557,15 +1561,9 @@ const COMMANDS: Record<string, Command> = {
     },
   },
 
-  gaming: {
-    description: 'GPU sleep / wake / status on the awnix fleet (alias of /gpu; fleet_verbs.py)',
-    usage: '/gaming [off|stop|pause = gpu sleep | on|start|resume = gpu wake | status] [--dry-run] [--force]',
-    handler: async (_client: GenesisClient, args: string) => { runFleetVerbCommand('gpu', args); },
-  },
-
   gpu: {
     description: 'GPU sleep | wake | status -- the owner\'s verbs (fleet_verbs.py; same as awdesk, adk, awnode)',
-    usage: '/gpu sleep|wake|status [--dry-run] [--force]',
+    usage: '/gpu sleep|wake|status [--dry-run] [--force]   (/gaming off|on = sleep|wake)',
     handler: async (_client: GenesisClient, args: string) => { runFleetVerbCommand('gpu', args); },
   },
 
@@ -2502,19 +2500,6 @@ const COMMANDS: Record<string, Command> = {
       } else {
         console.log(chalk.yellow('  ' + (result?.error || 'Review service not available.')));
       }
-    },
-  },
-
-  backup: {
-    // Replaced 2026-09-26: the old handler read /scheduler/backup/* (a legacy queue
-    // that never touched the declared backup sets) and a `backup_id` no route
-    // returns. Backups are now a platform op: `aither ops backups <verb>`.
-    description: 'Backups (platform ops): state, verify, run, restore',
-    usage: '/backup [state|verify|run|restore] [k=v] [--apply] [--agent genesis] [--watch]',
-    handler: async (client: GenesisClient, args: string) => {
-      const { runOpsCommand } = await import('./ops-command.js');
-      const argv = parseQuotedArgs(args.trim());
-      await runOpsCommand(['backups', ...(argv.length ? argv : ['state'])], client);
     },
   },
 
@@ -3879,300 +3864,6 @@ const COMMANDS: Record<string, Command> = {
     },
   },
 
-  generate: {
-    description: 'Generate an image via Canvas/Iris',
-    usage: '/generate [prompt] [--style <style>] [--size WxH] [--model <name>]',
-    handler: async (_client, args, config) => {
-      const canvasUrl = process.env.AITHER_CANVAS_URL || 'https://127.0.0.1:8108';
-      const modelsQs = config?.safetyLevel ? `?safety_level=${config.safetyLevel}` : '';
-
-      async function fetchModels(): Promise<string[]> {
-        const resp = await fetch(`${canvasUrl}/models${modelsQs}`, { signal: AbortSignal.timeout(5000) });
-        if (!resp.ok) return [];
-        const data = await resp.json() as any;
-        return data?.checkpoints || [];
-      }
-
-      function fuzzyMatch(checkpoints: string[], hint: string): string | undefined {
-        const h = hint.toLowerCase();
-        return checkpoints.find(m => m.toLowerCase() === h)
-          || checkpoints.find(m => m.toLowerCase().includes(h))
-          || checkpoints.find(m => m.toLowerCase().startsWith(h));
-      }
-
-      // Parse inline flags from args
-      let prompt = args;
-      let style: string | undefined;
-      let modelHint: string | undefined;
-      let tier: string = 'auto';
-      let width = 1024, height = 1024;
-      const styleMatch = args.match(/-{1,2}style\s+(\S+)/);
-      if (styleMatch) { style = styleMatch[1]; prompt = prompt.replace(styleMatch[0], ''); }
-      const sizeMatch = args.match(/-{1,2}size\s+(\d+)x(\d+)/);
-      if (sizeMatch) { width = Number(sizeMatch[1]); height = Number(sizeMatch[2]); prompt = prompt.replace(sizeMatch[0], ''); }
-      const modelMatch = args.match(/-{1,2}model\s+(\S+)/);
-      if (modelMatch) { modelHint = modelMatch[1]; prompt = prompt.replace(modelMatch[0], ''); }
-      prompt = prompt.replace(/^["']|["']$/g, '').trim();
-
-      // ── Interactive mode: walk through each step ──
-      // REPL kills stdin keypress emitter before handlers, so inquirer is broken.
-      // All interactive I/O uses raw stdin directly.
-      const interactive = !prompt;
-      if (interactive) {
-        if (process.stdin.isTTY) process.stdin.setRawMode(true);
-
-        // Raw text input — handles typing, backspace, Enter, Ctrl+C
-        function rawInput(label: string): Promise<string> {
-          process.stdout.write(label);
-          return new Promise<string>((resolve, reject) => {
-            let buf = '';
-            const onKey = (key: Buffer) => {
-              for (const byte of key) {
-                if (byte === 0x0d || byte === 0x0a) {
-                  process.stdin.removeListener('data', onKey);
-                  process.stdout.write('\n');
-                  resolve(buf); return;
-                }
-                if (byte === 0x03) {
-                  process.stdin.removeListener('data', onKey);
-                  process.stdout.write('\n');
-                  reject(new Error('cancelled')); return;
-                }
-                if (byte === 0x7f || byte === 0x08) {
-                  if (buf.length > 0) { buf = buf.slice(0, -1); process.stdout.write('\b \b'); }
-                } else if (byte >= 0x20) {
-                  buf += String.fromCharCode(byte);
-                  process.stdout.write(String.fromCharCode(byte));
-                }
-              }
-            };
-            process.stdin.on('data', onKey);
-          });
-        }
-
-        // Raw list picker — arrow keys to navigate, Enter to select, Ctrl+C to cancel
-        // Also supports typing to filter, backspace to clear filter
-        function rawPicker<T>(label: string, items: { name: string; value: T }[]): Promise<T> {
-          return new Promise<T>((resolve, reject) => {
-            let cursor = 0;
-            let filter = '';
-            let filtered = items;
-            const maxVisible = Math.min(12, process.stdout.rows - 4);
-
-            function getFiltered() {
-              if (!filter) return items;
-              const q = filter.toLowerCase();
-              return items.filter(i => i.name.toLowerCase().includes(q));
-            }
-
-            function render() {
-              // Clear previous render
-              const clearLines = maxVisible + 2;
-              for (let i = 0; i < clearLines; i++) {
-                process.stdout.write('\x1b[2K'); // clear line
-                if (i < clearLines - 1) process.stdout.write('\x1b[1A'); // move up
-              }
-              process.stdout.write('\r');
-
-              // Header
-              const filterDisplay = filter ? chalk.cyan(filter) : chalk.dim('type to filter');
-              process.stdout.write(`  ${chalk.bold(label)} [${filterDisplay}]\n`);
-
-              // Items
-              const scrollStart = Math.max(0, Math.min(cursor - Math.floor(maxVisible / 2), filtered.length - maxVisible));
-              for (let i = 0; i < maxVisible; i++) {
-                const idx = scrollStart + i;
-                if (idx >= filtered.length) {
-                  process.stdout.write('\x1b[2K\n');
-                } else {
-                  const marker = idx === cursor ? chalk.cyan('> ') : '  ';
-                  const text = idx === cursor ? chalk.bold(filtered[idx].name) : filtered[idx].name;
-                  process.stdout.write(`\x1b[2K  ${marker}${text}\n`);
-                }
-              }
-              // Footer
-              process.stdout.write(chalk.dim('  ↑↓ navigate · ⏎ select · type to filter'));
-            }
-
-            // Initial render: write blank lines first so we have space to clear
-            for (let i = 0; i < maxVisible + 2; i++) process.stdout.write('\n');
-            render();
-
-            const onKey = (key: Buffer) => {
-              // Handle escape sequences (arrow keys)
-              const seq = key.toString();
-              if (seq === '\x1b[A' || seq === '\x1bOA') { // Up
-                cursor = Math.max(0, cursor - 1);
-                render(); return;
-              }
-              if (seq === '\x1b[B' || seq === '\x1bOB') { // Down
-                cursor = Math.min(filtered.length - 1, cursor + 1);
-                render(); return;
-              }
-              for (const byte of key) {
-                if (byte === 0x0d || byte === 0x0a) { // Enter
-                  process.stdin.removeListener('data', onKey);
-                  process.stdout.write('\n');
-                  if (filtered[cursor]) resolve(filtered[cursor].value);
-                  else reject(new Error('cancelled'));
-                  return;
-                }
-                if (byte === 0x03 || byte === 0x1b) { // Ctrl+C or Esc
-                  process.stdin.removeListener('data', onKey);
-                  process.stdout.write('\n');
-                  reject(new Error('cancelled'));
-                  return;
-                }
-                if (byte === 0x7f || byte === 0x08) { // Backspace
-                  if (filter.length > 0) {
-                    filter = filter.slice(0, -1);
-                    filtered = getFiltered();
-                    cursor = Math.min(cursor, Math.max(0, filtered.length - 1));
-                    render();
-                  }
-                } else if (byte >= 0x20 && byte < 0x7f) { // Printable
-                  filter += String.fromCharCode(byte);
-                  filtered = getFiltered();
-                  cursor = 0;
-                  render();
-                }
-              }
-            };
-            process.stdin.on('data', onKey);
-          });
-        }
-
-        try {
-          // Step 1: Prompt
-          prompt = await rawInput(chalk.bold('  Prompt: '));
-          if (!prompt.trim()) return;
-
-          // Step 2: Model
-          let checkpoints: string[] = [];
-          try { checkpoints = await fetchModels(); } catch { /* Canvas offline */ }
-          if (checkpoints.length > 0) {
-            const modelItems = [
-              { name: chalk.dim('auto') + ' (let Canvas decide)', value: '__auto__' },
-              ...checkpoints.map(m => ({ name: m, value: m })),
-            ];
-            const modelChoice = await rawPicker('Model', modelItems);
-            if (modelChoice !== '__auto__') modelHint = modelChoice;
-          }
-
-          // Step 3: Style
-          style = await rawPicker('Style', [
-            { name: 'anime', value: 'anime' },
-            { name: 'realistic', value: 'realistic' },
-            { name: 'illustration', value: 'illustration' },
-            { name: 'cinematic', value: 'cinematic' },
-            { name: 'concept art', value: 'concept_art' },
-            { name: 'auto (default)', value: '' },
-          ]) || undefined;
-
-          // Step 4: Tier
-          tier = await rawPicker('Tier', [
-            { name: 'auto (server decides)', value: 'auto' },
-            { name: 'lightning (instant, ~1s)', value: 'lightning' },
-            { name: 'turbo (fast, ~3s)', value: 'turbo' },
-            { name: 'quality (detailed, ~15s)', value: 'quality' },
-            { name: 'ultra (publication, ~45s)', value: 'ultra' },
-          ]);
-
-          // Step 5: Size
-          const sizeChoice = await rawPicker('Size', [
-            { name: '1024x1024 (square)', value: '1024x1024' },
-            { name: '1280x720 (landscape)', value: '1280x720' },
-            { name: '720x1280 (portrait)', value: '720x1280' },
-            { name: '1536x1024 (wide)', value: '1536x1024' },
-            { name: '512x512 (fast)', value: '512x512' },
-          ]);
-          if (sizeChoice) {
-            const [w, h] = sizeChoice.split('x').map(Number);
-            width = w; height = h;
-          }
-        } catch { return; /* Ctrl+C / Esc cancels */ }
-      }
-
-      if (!prompt) return;
-
-      // Fuzzy-resolve model hint
-      let resolvedModel: string | undefined;
-      if (modelHint && !interactive) {
-        // Only fuzzy-resolve in non-interactive mode; interactive already picked exact name
-        let checkpoints: string[];
-        try { checkpoints = await fetchModels(); } catch { checkpoints = []; }
-        if (checkpoints.length) {
-          resolvedModel = fuzzyMatch(checkpoints, modelHint);
-          if (resolvedModel) {
-            console.log(chalk.dim(`  Model: ${modelHint} → ${resolvedModel}`));
-          } else {
-            console.log(chalk.yellow(`  No model matching "${modelHint}". Available:`));
-            for (const cp of checkpoints) console.log(chalk.dim(`    - ${cp}`));
-            return;
-          }
-        }
-      } else if (modelHint) {
-        resolvedModel = modelHint; // Interactive mode already resolved
-      }
-
-      // Show summary before generating
-      console.log();
-      console.log(chalk.bold('  Generating:'));
-      console.log(`    Prompt: ${chalk.white(prompt)}`);
-      if (resolvedModel) console.log(`    Model:  ${chalk.cyan(resolvedModel)}`);
-      if (style) console.log(`    Style:  ${chalk.cyan(style)}`);
-      console.log(`    Tier:   ${chalk.cyan(tier)}`);
-      console.log(`    Size:   ${chalk.dim(`${width}×${height}`)}`);
-      console.log(`    Safety: ${chalk.dim(config?.safetyLevel || 'default')}`);
-      console.log();
-
-      const spinner = ora('Generating image...').start();
-      try {
-        const body: Record<string, any> = { prompt, style, resolution: `${width}x${height}`, enhance_prompt: true, tier };
-        if (resolvedModel) body.preferred_model = resolvedModel;
-        if (config?.safetyLevel) body.safety_level = config.safetyLevel;
-        const resp = await fetch(`${canvasUrl}/generate`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(body),
-          signal: AbortSignal.timeout(300_000),
-        });
-        if (!resp.ok) throw new Error(`Canvas returned ${resp.status}: ${await resp.text()}`);
-        const result = await resp.json() as any;
-        spinner.stop();
-
-        const inner = result?.result || result;
-        const b64Images: string[] = inner?.images || [];
-        const rawUrl = inner?.url || inner?.image_url || inner?.path || '';
-
-        if (b64Images.length > 0) {
-          const repoRoot = resolveImagePath('Library/Output/images').replace(/Library.*$/, '');
-          const outDir = join(repoRoot, 'Library', 'Output', 'images');
-          mkdirSync(outDir, { recursive: true });
-
-          for (let i = 0; i < b64Images.length; i++) {
-            const fname = `gen_${Date.now().toString(16)}${i > 0 ? `_${i}` : ''}.png`;
-            const fpath = join(outDir, fname);
-            writeFileSync(fpath, Buffer.from(b64Images[i], 'base64'));
-            const fileUrl = `file:///${fpath.replace(/\\/g, '/')}`;
-            const link = `\x1b]8;;${fileUrl}\x1b\\${chalk.cyan.underline(fpath)}\x1b]8;;\x1b\\`;
-            console.log(chalk.green('  Image saved: ') + link);
-          }
-          const modelUsed = inner?.model_used || '';
-          const seed = inner?.seed ?? '';
-          if (modelUsed || seed) console.log(chalk.dim(`  Model: ${modelUsed}${seed ? ` · Seed: ${seed}` : ''}`));
-        } else if (rawUrl) {
-          const absPath = resolveImagePath(rawUrl);
-          const fileUrl = `file:///${absPath.replace(/\\/g, '/')}`;
-          const link = `\x1b]8;;${fileUrl}\x1b\\${chalk.cyan.underline(absPath)}\x1b]8;;\x1b\\`;
-          console.log(chalk.green('  Image generated: ') + link);
-        } else {
-          console.log(chalk.yellow('  Generation completed but no images returned.'));
-        }
-      } catch (e: any) { spinner.stop(); console.log(chalk.red(`  Error: ${e.message}`)); }
-    },
-  },
-
   checkpoints: {
     description: 'List available image generation models (checkpoints + LoRAs)',
     usage: '/checkpoints [search term]',
@@ -4492,7 +4183,7 @@ const COMMANDS: Record<string, Command> = {
 
   imagine: {
     description: 'Generate an image (Sana / ComfyUI / Gemini / OpenAI)',
-    usage: '/imagine <prompt> [--backend sana|comfyui|gemini|openai] [--model <name>] [-w 1024] [-h 1024] [-o out.png]  |  /imagine backends  |  /imagine models',
+    usage: '/imagine <prompt> [--backend sana|comfyui|gemini|openai] [--model <name>] [-w 1024] [-h 1024 | --size WxH] [--style <s>] [-o out.png]  |  /imagine backends  |  /imagine models',
     handler: async (client: GenesisClient, args: string, config: ShellConfig) => {
       const BACKENDS = ['sana', 'comfyui', 'gemini', 'openai'];
       const LABELS: Record<string, string> = {
@@ -4563,17 +4254,22 @@ const COMMANDS: Record<string, Command> = {
       };
       const backend = (flag(/--backend\s+(\S+)/) || flag(/-b\s+(\S+)/) || 'sana').toLowerCase();
       const model = flag(/--model\s+(\S+)/) || flag(/-m\s+(\S+)/);
-      const width = parseInt(flag(/--width\s+(\d+)/) || flag(/-w\s+(\d+)/) || '1024');
-      const height = parseInt(flag(/--height\s+(\d+)/) || flag(/-h\s+(\d+)/) || '1024');
+      // `--size WxH` and `--style <s>` are the spellings the retired /generate took
+      // (now an alias of this command), so a muscle-memory line still works.
+      const size = args.match(/--size\s+(\d+)x(\d+)/);
+      const width = parseInt(flag(/--width\s+(\d+)/) || flag(/-w\s+(\d+)/) || size?.[1] || '1024');
+      const height = parseInt(flag(/--height\s+(\d+)/) || flag(/-h\s+(\d+)/) || size?.[2] || '1024');
       const steps = parseInt(flag(/--steps\s+(\d+)/) || '20');
       const output = flag(/--output\s+(\S+)/) || flag(/-o\s+(\S+)/);
       const negative = flag(/--negative\s+"([^"]+)"/) || flag(/--negative\s+(\S+)/);
+      const style = flag(/--style\s+(\S+)/);
 
-      const prompt = args
-        .replace(/--(backend|model|width|height|steps|output|negative)\s+("[^"]+"|\S+)/g, '')
+      const bare = args
+        .replace(/--(backend|model|width|height|steps|output|negative|size|style)\s+("[^"]+"|\S+)/g, '')
         .replace(/-[bmwho]\s+\S+/g, '')
         .replace(/^["']|["']$/g, '')
         .trim();
+      const prompt = bare && style ? `${bare}, ${style} style` : bare;
 
       if (!prompt) {
         console.log(chalk.yellow('  Usage: /imagine <prompt> [--backend sana|comfyui|gemini|openai] [--model <name>] [-w 1024] [-h 1024] [-o out.png]'));
@@ -6232,7 +5928,6 @@ COMMANDS.v4 = {
     if (data?.tokens?.total_tokens) console.log(chalk.dim(`  Tokens: ${data.tokens.total_tokens}`));
   },
 };
-COMMANDS.elevate = COMMANDS.v4;
 
 // ── /deepseek — interactive wizard: route the live orchestrator to DeepSeek ──
 // Drives the REAL lever (model stack switch), NOT the reasoning profile (which
@@ -6964,7 +6659,6 @@ COMMANDS['docker'] = {
       }
     },
 };
-COMMANDS['dc'] = COMMANDS['docker'];
 
 // ═══════════════════════════════════════════════════════════════════════════
 // COMPUTE — Federated Compute Fabric management
@@ -7204,7 +6898,6 @@ COMMANDS['calendar'] = {
     }
   },
 };
-COMMANDS['cal'] = COMMANDS['calendar'];
 
 COMMANDS['mail'] = {
   description: 'Manage email inbox and sending',
@@ -7278,7 +6971,6 @@ COMMANDS['mail'] = {
     }
   },
 };
-COMMANDS['email'] = COMMANDS['mail'];
 
 COMMANDS['will'] = {
   description: 'Manage Will policies (autonomous behavior directives)',
@@ -8537,7 +8229,6 @@ COMMANDS['desk'] = {
 };
 // Alias: the command was `/persona` for its first months; keep the old spelling
 // working so a muscle-memory `/persona show` is not a silent 'unknown command'.
-COMMANDS['persona'] = COMMANDS['desk'];
 
 // ── Briefs — the executive-brief delivery plane ──
 
@@ -8683,9 +8374,6 @@ COMMANDS['workspace'] = {
   },
 };
 
-COMMANDS['bug'] = COMMANDS['report-bug'];
-COMMANDS['draw'] = COMMANDS['imagine'];
-COMMANDS['gen'] = COMMANDS['imagine'];
 
 // ═══════════════════════════════════════════════════════════════════════════
 // COMMAND — talk to the awdesk Command agent (POST /command, poll /command/history)
@@ -8745,7 +8433,6 @@ COMMANDS['command'] = {
     }
   },
 };
-COMMANDS['do'] = COMMANDS['command'];
 
 // `/spend [24h|7d|30d] [--json]` — cloud LLM spend (DeepSeek and kin): totals, per
 // provider/model, top callers, DeepSeek balance. Asks the gateway's `cloud_spend` tool;
@@ -8760,23 +8447,112 @@ COMMANDS['spend'] = {
   },
 };
 
+// `/rc [status|stop]` — remote control, like Claude Code's /remote-control: the same
+// `adk rc` as `awsh rc` (rc-command.ts; no credential handling here), held in the
+// background so the prompt stays usable, with the sessions URL and a QR to scan.
+COMMANDS['rc'] = {
+  description: "Remote control: make this machine's sessions reachable from your phone (QR)",
+  usage: '/rc [status|stop] [--node-class <c>] [--harness-url <u>] [--once]',
+  handler: async (_client: GenesisClient, args: string) => {
+    const { runRcSlash } = await import('./rc-command.js');
+    await runRcSlash(parseQuotedArgs(args.trim()));
+  },
+};
+
+// `/devices [add|status|rm|…]` — this account's devices; `add` shows a pairing code
+// and a QR so a phone or Steam Deck can join. Shells out to `adk devices`.
+COMMANDS['devices'] = {
+  description: "This account's devices; /devices add shows a pairing code + QR to add one",
+  usage: '/devices [list | add [--no-wait] | status [id] | rm <id> | command <id> <verb>]',
+  handler: async (_client: GenesisClient, args: string) => {
+    const { runDevicesCommand } = await import('./devices-command.js');
+    await runDevicesCommand(parseQuotedArgs(args.trim()));
+  },
+};
+
+/**
+ * Alias -> canonical command. THE one place a second spelling is declared.
+ *
+ * Every entry in COMMANDS is a distinct command with its own handler; a second
+ * spelling of the same thing lives here instead, so /help lists the command once
+ * ("/imagine (alias: /draw, /gen, /generate)") and two spellings can never drift
+ * into two implementations again -- /generate and /imagine, /backup and /backups,
+ * /gaming and /gpu were each a full copy before they were folded in here.
+ * commands.json carries these for the offline registry and is regenerated from
+ * this table (check_shell_command_roster.py --write). test/command-dedupe.test.ts
+ * fails on a shared handler, an alias that shadows a command, or a doubled /help row.
+ */
+export const COMMAND_ALIASES: Readonly<Record<string, string>> = Object.freeze({
+  'agent-new': 'compose',
+  b: 'briefs',
+  backup: 'backups',
+  bug: 'report-bug',
+  cal: 'calendar',
+  dc: 'docker',
+  do: 'command',
+  draw: 'imagine',
+  elevate: 'v4',
+  email: 'mail',
+  fabric: 'compute',
+  gaming: 'gpu',
+  gen: 'imagine',
+  generate: 'imagine',
+  lb: 'lockbox',
+  mon: 'monitor',
+  nb: 'notebook',
+  persona: 'desk',
+  prod: 'products',
+  'resume-all': 'resume',
+});
+
+const ownCommand = (k: string): boolean => Object.prototype.hasOwnProperty.call(COMMANDS, k);
+
+/** The canonical name `name` resolves to (itself when it is not an alias). */
+export function canonicalCommandName(name: string): string {
+  const lower = name.toLowerCase();
+  if (ownCommand(lower)) return lower;
+  return Object.prototype.hasOwnProperty.call(COMMAND_ALIASES, lower)
+    ? COMMAND_ALIASES[lower]
+    : lower;
+}
+
+/** The aliases of a canonical command, sorted (empty when it has none). */
+export function aliasesOf(canonical: string): string[] {
+  return Object.keys(COMMAND_ALIASES)
+    .filter((a) => COMMAND_ALIASES[a] === canonical && !ownCommand(a))
+    .sort();
+}
+
 export function getCommand(name: string): Command | undefined {
   const lower = name.toLowerCase();
-  const own = (k: string) => Object.prototype.hasOwnProperty.call(COMMANDS, k);
-  if (own(lower)) return COMMANDS[lower];
-  // Aliases are declared once, in commands.json, and loaded into the
-  // registry's alias map. Resolve the alias to its canonical name and
-  // dispatch that command's handler. Own-property checks keep
-  // Object.prototype members (constructor, toString, ...) from resolving.
+  if (ownCommand(lower)) return COMMANDS[lower];
+  const canonical = canonicalCommandName(lower);
+  if (canonical !== lower && ownCommand(canonical)) return COMMANDS[canonical];
+  // Genesis-discovered aliases ride the registry's alias map. Own-property
+  // checks keep Object.prototype members (constructor, toString, ...) from
+  // resolving.
   try {
-    const canonical = getCommandRegistry().resolve(lower)?.name;
-    if (canonical && canonical !== lower && own(canonical)) return COMMANDS[canonical];
+    const dyn = getCommandRegistry().resolve(lower)?.name;
+    if (dyn && dyn !== lower && ownCommand(dyn)) return COMMANDS[dyn];
   } catch {
     // registry unavailable -> behave as before (unknown command)
   }
   return undefined;
 }
 
+/** Canonical command names only -- aliases are in COMMAND_ALIASES. */
 export function getCommandNames(): string[] {
   return Object.keys(COMMANDS);
+}
+
+/** Every alias spelling (for completion), excluding any shadowed by a command. */
+export function getCommandAliasNames(): string[] {
+  return Object.keys(COMMAND_ALIASES).filter((a) => !ownCommand(a));
+}
+
+/** The /help rows: one per canonical command, aliases folded into the name cell. */
+export function helpRows(): Array<{ name: string; aliases: string[]; description: string }> {
+  return Object.entries(COMMANDS)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([name, cmd]) => ({ name, aliases: aliasesOf(name), description: cmd.description }));
 }

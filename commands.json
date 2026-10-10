@@ -7,10 +7,18 @@
       "aliases": []
     },
     {
+      "name": "backend",
+      "category": "shell",
+      "description": "Switch which LLM backend drives a Claude Code session (list|use|status)",
+      "aliases": []
+    },
+    {
       "name": "backups",
       "category": "core",
       "description": "Backups: state | verify | run | restore set_id=\u2026 target_dir=/tmp/\u2026",
-      "aliases": []
+      "aliases": [
+        "backup"
+      ]
     },
     {
       "name": "briefs",
@@ -79,6 +87,12 @@
       "aliases": []
     },
     {
+      "name": "devices",
+      "category": "core",
+      "description": "",
+      "aliases": []
+    },
+    {
       "name": "docker",
       "category": "ops",
       "description": "Manage Docker containers (up/down/status/build/restart/logs/ps/recover)",
@@ -111,6 +125,14 @@
       "aliases": []
     },
     {
+      "name": "gpu",
+      "category": "core",
+      "description": "",
+      "aliases": [
+        "gaming"
+      ]
+    },
+    {
       "name": "ide",
       "category": "core",
       "description": "Open ForgeIDE in browser (optionally for a sandbox session)",
@@ -122,7 +144,8 @@
       "description": "",
       "aliases": [
         "draw",
-        "gen"
+        "gen",
+        "generate"
       ]
     },
     {
@@ -214,6 +237,12 @@
       "aliases": []
     },
     {
+      "name": "rc",
+      "category": "core",
+      "description": "",
+      "aliases": []
+    },
+    {
       "name": "report-bug",
       "category": "core",
       "description": "Report a bug with structured details",
@@ -234,12 +263,6 @@
       "aliases": [
         "resume-all"
       ]
-    },
-    {
-      "name": "backend",
-      "category": "shell",
-      "description": "Switch which LLM backend drives a Claude Code session (list|use|status)",
-      "aliases": []
     },
     {
       "name": "sandbox",
@@ -293,8 +316,14 @@
       "name": "tool-scope",
       "category": "security",
       "description": "View or modify workspace tool scoping",
+      "aliases": []
+    },
+    {
+      "name": "v4",
+      "category": "core",
+      "description": "",
       "aliases": [
-        "scope"
+        "elevate"
       ]
     },
     {

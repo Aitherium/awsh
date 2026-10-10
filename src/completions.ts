@@ -4,11 +4,11 @@ import { getActiveConfig } from './config.js';
  */
 
 import type { GenesisClient } from './client.js';
-import { getCommandNames } from './commands.js';
+import { getCommandAliasNames, getCommandNames } from './commands.js';
 import { getCommandRegistry } from './command-registry.js';
 
 // Build initial list from static commands; refreshed after dynamic loading
-let COMMAND_NAMES = [...getCommandNames().map(n => `/${n}`), '/jobs'];
+let COMMAND_NAMES = [...getCommandNames(), ...getCommandAliasNames()].map(n => `/${n}`).concat('/jobs');
 
 /**
  * Refresh the completion command list from the registry.

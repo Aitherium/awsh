@@ -2018,10 +2018,10 @@ function buildCommandChoices() {
     ['Jobs',       ['jobs', 'fg']],
     ['Search',     ['search', 'codegraph', 'scope', 'onboard', 'obsidian', 'tools', 'context']],
     ['AI',         ['think', 'research', 'memory', 'soul']],
-    ['Ops',        ['deploy', 'fleet', 'workflow', 'backup', 'benchmark', 'products', 'docker']],
+    ['Ops',        ['deploy', 'fleet', 'workflow', 'backups', 'benchmark', 'products', 'docker']],
     ['Security',   ['security', 'review', 'train', 'tool-scope', 'rbac']],
-    ['Automation', ['run', 'script', 'apps', 'gaming', 'routines']],
-    ['Auth',       ['login', 'register', 'logout', 'whoami']],
+    ['Automation', ['run', 'script', 'apps', 'gpu', 'routines']],
+    ['Auth',       ['login', 'register', 'logout', 'whoami', 'link', 'rc', 'devices']],
     ['Shell',      ['help', 'clear', 'config', 'gui', 'password']],   // 'gui' survives the filter above only when the pack declares an app
   ];
 

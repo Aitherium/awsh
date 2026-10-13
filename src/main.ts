@@ -1193,6 +1193,13 @@ $rows | ForEach-Object { [Console]::Out.WriteLine("PATH=" + $_) }`;
     }
   }
 
+  // `awsh hearth [pending | approve <code> | deny <code>]` — the owner's Hearth cards,
+  // answered from the terminal through the gateway's hearth_approve (src/hearth-approvals.ts).
+  if (args[0] && args[0].toLowerCase() === 'hearth') {
+    process.exitCode = await runHearthFromTerminal(args.slice(1), config);
+    return;
+  }
+
   // `aither caps …` — the effective-capability surface.
   //
   // Dispatched HERE, after backend resolution, and NOT alongside `decisions` /
@@ -1275,7 +1282,16 @@ $rows | ForEach-Object { [Console]::Out.WriteLine("PATH=" + $_) }`;
       console.error(chalk.red('No prompt provided (positional argument or piped stdin).'));
       process.exit(1);
     }
+    // A card this turn leaves waiting (e.g. the orchestrator asked Hearth to open a page)
+    // is printed with the line that answers it, here, not only on the phone (2026-10-13).
+    const hearthCall = hearthCaller(config);
+    const { pendingApprovals, printNewPendingAfterTurn, withTimeout } = await import('./hearth-approvals.js');
+    const before = hearthCall ? withTimeout(pendingApprovals(hearthCall).catch(() => null), 4000, null) : null;
     const ok = await oneShotChat(client, config, prompt, resumeSummary);
+    if (hearthCall && before) {
+      await withTimeout(printNewPendingAfterTurn(hearthCall, before, (l) => console.log(chalk.yellow(l))),
+        5000, undefined);
+    }
     process.exit(ok ? 0 : 1);
   } else {
     // Remote endpoints force a real sign-in before the shell opens.
@@ -1840,6 +1856,47 @@ ${chalk.bold('Routing:')}
   @agent_name message             Route to specific agent
   message                         Route to default agent
 `);
+}
+
+/* ── Hearth approval cards in the terminal (src/hearth-approvals.ts) ── */
+
+/** A gateway tool caller for the signed-in owner, or null when no MCP gateway is configured. */
+function hearthCaller(config: ShellConfig): ((name: string, args: Record<string, unknown>) => Promise<any>) | null {
+  if (process.env.AWSH_HEARTH_CARDS === '0' || !config.mcpUrl) return null;
+  let mcp: any = null;
+  return async (name, args) => {
+    if (!mcp) {
+      const { getRemoteMcpClient } = await import('./mcp-client.js');
+      mcp = getRemoteMcpClient(config);
+      if (!mcp) throw new Error('no MCP gateway configured (AITHER_MCP_URL)');
+    }
+    const { parseToolResult } = await import('./hearth-approvals.js');
+    return parseToolResult(await mcp.callTool(name, args));
+  };
+}
+
+async function runHearthFromTerminal(argv: string[], config: ShellConfig): Promise<number> {
+  const call = hearthCaller(config);
+  if (!call) {
+    console.error(chalk.red('awsh hearth needs the MCP gateway (set AITHER_MCP_URL or sign in with /login).'));
+    return 2;
+  }
+  const { runHearthCommand } = await import('./hearth-approvals.js');
+  const { createInterface } = await import('node:readline/promises');
+  try {
+    return await runHearthCommand(argv, {
+      call,
+      out: (l) => console.log(l),
+      isTTY: Boolean(process.stdin.isTTY && process.stdout.isTTY),
+      ask: async (q) => {
+        const rl = createInterface({ input: process.stdin, output: process.stdout });
+        try { return await rl.question(q); } finally { rl.close(); }
+      },
+    });
+  } catch (err) {
+    console.error(chalk.red(`awsh hearth: ${(err as Error).message}`));
+    return 1;
+  }
 }
 
 main().catch((err) => {

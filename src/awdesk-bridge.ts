@@ -16,7 +16,48 @@
  * only place that conversion lives.
  */
 
+import { readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 import { daemonToken } from './harness-client.js';
+
+const LABEL_RE = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
+
+function readJson(file: string): any {
+  try {
+    return JSON.parse(readFileSync(file, 'utf8').replace(/^﻿/, ''));
+  } catch {
+    return null;
+  }
+}
+
+/** The workspace label this PC belongs to, or null: Desk's own tenant file
+ *  (~/.aither/desk-tenant.json, one label under aitherium.com) first, then the signed-in
+ *  account's canonical tenant id (`tnt_<label with - as _>`) in ~/.aither/auth.json.
+ *  Same lookup as awdk's adk.desk_release.known_tenant_label. */
+export function knownTenantLabel(home: string = homedir()): string | null {
+  const tenant = readJson(join(home, '.aither', 'desk-tenant.json'));
+  const host = typeof tenant?.host === 'string' ? tenant.host.trim().toLowerCase() : '';
+  if (host.endsWith('.aitherium.com')) {
+    const label = host.slice(0, -'.aitherium.com'.length);
+    if (LABEL_RE.test(label)) return label;
+  }
+  const auth = readJson(join(home, '.aither', 'auth.json'));
+  const prof = auth?.profiles?.[auth?.active_profile ?? ''];
+  const tid = typeof prof?.user?.tenant_id === 'string' ? prof.user.tenant_id.trim().toLowerCase() : '';
+  if (/^tnt_[a-z0-9_]{1,76}$/.test(tid)) {
+    const label = tid.slice(4).replace(/_/g, '-');
+    if (LABEL_RE.test(label)) return label;
+  }
+  return null;
+}
+
+/** The one "how to update Desk" sentence (identical in awsh, awdk and the MCP tool).
+ *  Never a raw command: Desk updates itself, or the workspace setup page reinstalls it. */
+export function deskUpdateHint(label: string | null = knownTenantLabel()): string {
+  const host = label && LABEL_RE.test(label) ? `${label}.aitherium.com` : '<your-workspace>.aitherium.com';
+  return `update Desk from Desk's own update notice, or re-run setup at https://${host}/setup-pc`;
+}
 
 /** Mutating bridge routes (POST /fleet/<verb>, POST /command) require the awdk daemon's
  *  bearer since 2026-09-08 -- Host+Origin alone let any local process stop the fleet.
@@ -436,7 +477,7 @@ export async function deskDesktop(surface: 'overlay' | 'app' | 'status'): Promis
   });
   if (!resp.ok) {
     throw new Error(resp.status === 404
-      ? 'this awdesk has no /desktop routes (older build) — update Desk'
+      ? `this awdesk has no /desktop routes (older build) — ${deskUpdateHint()}`
       : `Desktop '${surface}' failed: HTTP ${resp.status}`);
   }
   const text = await resp.text();
@@ -457,7 +498,7 @@ export async function deskCommands(): Promise<DeskCommand[]> {
   const resp = await fetch(`${PERSONA_BASE}/commands`, { signal: AbortSignal.timeout(8_000) });
   if (!resp.ok) {
     throw new Error(resp.status === 404
-      ? 'this awdesk has no /commands route (older build) — update Desk'
+      ? `this awdesk has no /commands route (older build) — ${deskUpdateHint()}`
       : `desk commands failed: HTTP ${resp.status}`);
   }
   const body = await resp.json() as { commands?: DeskCommand[] };

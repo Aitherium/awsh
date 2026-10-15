@@ -53,7 +53,7 @@ import {
   deskCommand,
   deskCommandHistory,
 } from './awdesk-bridge.js';
-import { deskCommands, deskRunCommand } from './awdesk-bridge.js';
+import { deskCommands, deskRunCommand, deskUpdateHint } from './awdesk-bridge.js';
 import {
   addProject, listProjects, switchProject, removeProject, getActiveWorkspace, pickDirectory,
 } from './workspace.js';
@@ -1354,12 +1354,12 @@ const COMMANDS: Record<string, Command> = {
 
       const apps: Record<string, AppDef> = {
         desktop: {
-          name: 'AitherDesktop',
-          type: 'PyQt6 native app',
-          checkCmd: 'pip show aither-desktop',
-          installCmd: `pip install -e "${join(repoRoot, 'AitherOS', 'apps', 'AitherDesktop')}"`,
-          startCmd: 'aither-desktop',
-          note: 'Native desktop app (PyQt6 + WebView). Win+A hotkey.',
+          // Desk is installed one way everywhere: the workspace setup page (or
+          // `adk deploy desktop`, which does the same verified install). Never the
+          // legacy AitherDesktop app.
+          name: 'Desk',
+          type: 'Desktop app',
+          note: `Install or ${deskUpdateHint()}.`,
         },
         node: {
           name: 'awnode',

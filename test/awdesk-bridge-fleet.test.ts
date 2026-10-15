@@ -306,4 +306,24 @@ test('deskDesktop: status is a GET, overlay/app POST, no bearer, and an old desk
   assert.equal(calls[1].init?.method, 'GET');
   stubFetch(() => ({ status: 404, text: '' }));
   await assert.rejects(() => deskDesktop('overlay'), /older build/);
+  // ...and says HOW to update: Desk's own notice, or the workspace setup page.
+  await assert.rejects(() => deskDesktop('overlay'), /update notice, or re-run setup at https:\/\/[^ ]+\.aitherium\.com\/setup-pc/);
+});
+
+test('deskUpdateHint: tenant-aware setup-pc link, placeholder when unknown', async () => {
+  const { deskUpdateHint, knownTenantLabel } = await import('../src/awdesk-bridge.js');
+  const { mkdtempSync, mkdirSync, writeFileSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  assert.equal(deskUpdateHint('acme'),
+    "update Desk from Desk's own update notice, or re-run setup at https://acme.aitherium.com/setup-pc");
+  assert.match(deskUpdateHint(null), /https:\/\/<your-workspace>\.aitherium\.com\/setup-pc$/);
+  const home = mkdtempSync(join(tmpdir(), 'deskhint-'));
+  assert.equal(knownTenantLabel(home), null);
+  mkdirSync(join(home, '.aither'));
+  writeFileSync(join(home, '.aither', 'auth.json'),
+    JSON.stringify({ active_profile: 'p', profiles: { p: { user: { tenant_id: 'tnt_acme_co' } } } }));
+  assert.equal(knownTenantLabel(home), 'acme-co');
+  writeFileSync(join(home, '.aither', 'desk-tenant.json'), JSON.stringify({ host: 'other.aitherium.com' }));
+  assert.equal(knownTenantLabel(home), 'other');
 });

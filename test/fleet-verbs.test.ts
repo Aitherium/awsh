@@ -29,8 +29,34 @@ test('the old /gaming words keep their meaning: off/stop/pause = sleep, on/start
   for (const w of ['on', 'start', 'resume', 'up']) {
     assert.deepEqual(fleetVerbArgs('gpu', w), ['gpu', 'wake', '--execute'], w);
   }
-  assert.deepEqual(fleetVerbArgs('fleet', 'down'), ['fleet', 'sleep', '--execute']);
+  // 2026-10-15: /fleet down keeps the business set up; the VM-off sleep is /fleet sleep by name
+  assert.deepEqual(fleetVerbArgs('fleet', 'down'), ['game', 'down', '--execute']);
   assert.deepEqual(fleetVerbArgs('fleet', 'up'), ['fleet', 'wake', '--execute']);
+});
+
+test('/inference <mode> is the one toggle, the same argv as awdesk and adk', () => {
+  assert.deepEqual(fleetVerbArgs('inference', 'on'), ['inference', 'on', '--execute']);
+  assert.deepEqual(fleetVerbArgs('inference', 'dgx'), ['inference', 'dgx', '--execute']);
+  assert.deepEqual(fleetVerbArgs('inference', 'spark'), ['inference', 'dgx', '--execute']);
+  assert.deepEqual(fleetVerbArgs('inference', 'off --spark'), ['inference', 'off', '--execute', '--spark']);
+  assert.deepEqual(fleetVerbArgs('inference', 'status --json'), ['inference', 'status', '--json']);
+  assert.deepEqual(fleetVerbArgs('inference', ''), ['inference', 'status']);
+  assert.deepEqual(fleetVerbArgs('inference', 'dgx --dry-run'), ['inference', 'dgx']);
+  assert.deepEqual(fleetVerbArgs('inference', 'on --spark'), ['inference', 'on', '--execute'], '--spark only on off');
+  assert.throws(() => fleetVerbArgs('inference', 'maybe'), FleetVerbError);
+});
+
+test('/fleet profile <tier> builds fleet profile argv; an unknown tier is refused', () => {
+  for (const tier of ['business', 'platform', 'critical', 'full']) {
+    assert.deepEqual(fleetVerbArgs('fleet', `profile ${tier}`), ['fleet', 'profile', tier, '--execute']);
+  }
+  assert.throws(() => fleetVerbArgs('fleet', 'profile'), FleetVerbError);
+  assert.throws(() => fleetVerbArgs('fleet', 'profile no-core'), FleetVerbError);
+});
+
+test('/inference is registered as a slash command', () => {
+  assert.ok(getCommand('inference'));
+  assert.match(getCommand('inference').usage, /on\|dgx\|off\|status/);
 });
 
 test('--force only rides on gpu wake; unknown words are refused; /fleet refresh is not a verb', () => {

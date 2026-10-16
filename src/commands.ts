@@ -15,7 +15,7 @@ import type { ShellConfig } from './config.js';
 import { getActiveConfig, DEFAULT_AGENT } from './config.js';
 import { getRemoteMcpClient } from './mcp-client.js';
 import { fleetProbeArgv, fleetRecoverPlan, fleetStateIsUp, parseFleetState } from './fleet-recover.js';
-import { fleetVerbArgs, findFleetVerbsTool, fleetVerbCommand, FleetVerbError, FLEET_VERBS_HELP } from './fleet-verbs.js';
+import { fleetVerbArgs, findFleetVerbsTool, fleetVerbCommand, FleetVerbError, FLEET_VERBS_HELP, type FleetNoun } from './fleet-verbs.js';
 import { getCommandRegistry } from './command-registry.js';
 import { isAdultContentVisible, invalidateAdultGate, ADULT_TIERS } from './adult-gate.js';
 import { formatTable, getSessionArtifacts, clearSessionArtifacts, resolveImagePath, osc8Link, addSessionArtifact, type SessionArtifact } from './renderer.js';
@@ -1565,6 +1565,12 @@ const COMMANDS: Record<string, Command> = {
     description: 'GPU sleep | wake | status -- the owner\'s verbs (fleet_verbs.py; same as awdesk, adk, awnode)',
     usage: '/gpu sleep|wake|status [--dry-run] [--force]   (/gaming off|on = sleep|wake)',
     handler: async (_client: GenesisClient, args: string) => { runFleetVerbCommand('gpu', args); },
+  },
+
+  inference: {
+    description: 'Inference toggle: on | dgx | off | status -- proven by a real completion per lane through MicroScheduler (fleet_verbs.py; same as awdesk, adk, MCP)',
+    usage: '/inference on|dgx|off|status [--dry-run] [--json] [--spark]',
+    handler: async (_client: GenesisClient, args: string) => { runFleetVerbCommand('inference', args); },
   },
 
   // ── Safety Management ─────────────────────────────────────────────────
@@ -4623,7 +4629,7 @@ const COMMANDS: Record<string, Command> = {
 
 
 /** /gpu, /gaming and /fleet (non-refresh): spawn fleet_verbs.py with the owner's verb, stream it. */
-export function runFleetVerbCommand(noun: 'gpu' | 'fleet', args: string): number {
+export function runFleetVerbCommand(noun: FleetNoun, args: string): number {
   const rc = runFleetVerb(noun, args);
   // `aither -c "gpu wake"` must exit with the verb's code: a refusal (GPU access blocked, a
   // running game, the maintenance lock) is 1, could-not-judge is 2, and a script or hook
@@ -4632,7 +4638,7 @@ export function runFleetVerbCommand(noun: 'gpu' | 'fleet', args: string): number
   return rc;
 }
 
-function runFleetVerb(noun: 'gpu' | 'fleet', args: string): number {
+function runFleetVerb(noun: FleetNoun, args: string): number {
   if (/^\s*help\b/i.test(args)) {
     console.log(chalk.bold(`\n  /${noun} -- the owner's fleet verbs\n`));
     console.log(FLEET_VERBS_HELP + '\n');

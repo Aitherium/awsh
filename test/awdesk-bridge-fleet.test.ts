@@ -316,7 +316,7 @@ test('deskUpdateHint: tenant-aware setup-pc link, placeholder when unknown', asy
   const { tmpdir } = await import('node:os');
   const { join } = await import('node:path');
   assert.equal(deskUpdateHint('acme'),
-    "update Desk from Desk's own update notice, or re-run setup at https://acme.aitherium.com/setup-pc");
+    "update Aither from its own update notice, or re-run setup at https://acme.aitherium.com/setup-pc");
   assert.match(deskUpdateHint(null), /https:\/\/<your-workspace>\.aitherium\.com\/setup-pc$/);
   const home = mkdtempSync(join(tmpdir(), 'deskhint-'));
   assert.equal(knownTenantLabel(home), null);

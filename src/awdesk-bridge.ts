@@ -56,7 +56,7 @@ export function knownTenantLabel(home: string = homedir()): string | null {
  *  Never a raw command: Desk updates itself, or the workspace setup page reinstalls it. */
 export function deskUpdateHint(label: string | null = knownTenantLabel()): string {
   const host = label && LABEL_RE.test(label) ? `${label}.aitherium.com` : '<your-workspace>.aitherium.com';
-  return `update Desk from Desk's own update notice, or re-run setup at https://${host}/setup-pc`;
+  return `update Aither from its own update notice, or re-run setup at https://${host}/setup-pc`;
 }
 
 /** Mutating bridge routes (POST /fleet/<verb>, POST /command) require the awdk daemon's
@@ -477,7 +477,7 @@ export async function deskDesktop(surface: 'overlay' | 'app' | 'status'): Promis
   });
   if (!resp.ok) {
     throw new Error(resp.status === 404
-      ? `this awdesk has no /desktop routes (older build) — ${deskUpdateHint()}`
+      ? `this Aither app is an older build (no /desktop routes) — ${deskUpdateHint()}`
       : `Desktop '${surface}' failed: HTTP ${resp.status}`);
   }
   const text = await resp.text();
@@ -498,7 +498,7 @@ export async function deskCommands(): Promise<DeskCommand[]> {
   const resp = await fetch(`${PERSONA_BASE}/commands`, { signal: AbortSignal.timeout(8_000) });
   if (!resp.ok) {
     throw new Error(resp.status === 404
-      ? `this awdesk has no /commands route (older build) — ${deskUpdateHint()}`
+      ? `this Aither app is an older build (no /commands route) — ${deskUpdateHint()}`
       : `desk commands failed: HTTP ${resp.status}`);
   }
   const body = await resp.json() as { commands?: DeskCommand[] };

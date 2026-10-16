@@ -1819,7 +1819,7 @@ ${chalk.bold('Quick actions:')}
   aither -c "gpu wake"            GPU wake: models back one at a time (game off)
   aither -c "fleet sleep"         Fleet sleep / wake / critical / status (fleet_verbs.py)
   aither -c apps                  Show all AitherOS app statuses
-  aither -c "apps install desktop"  How to install or update Desk
+  aither -c "apps install desktop"  How to install or update the Aither app
   aither -c "apps start veil"    Start AitherVeil dashboard
 
 ${chalk.bold('Examples:')}

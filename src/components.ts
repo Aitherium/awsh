@@ -2,7 +2,7 @@
  * components.ts — what is INSTALLED on this device, as packs the shell can use.
  *
  * THE POINT. `awsh gobbonet` launches a brain pack. A COMPONENT is the other
- * thing a machine carries: awgym, awrun's queue, awdesk, an ollama — things
+ * thing a machine carries: awgym, awrun's queue, awdesk, a llama-server — things
  * with a port, a UI, a few commands. Before 2026-09-06 awsh could not see them:
  * packs.ts reads brain_pack.yaml trees and nothing else, so a brick a user had
  * just `pip install`ed was invisible from the shell that is supposed to be its

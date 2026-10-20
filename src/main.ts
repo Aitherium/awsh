@@ -361,7 +361,7 @@ async function main() {
   // ── `awsh components` — what is INSTALLED on this device ─────────────────
   //
   // Packs are brains; components are the things a machine carries (awgym,
-  // awrun's queue, awdesk, an ollama). The awdk daemon is the ONE loader for
+  // awrun's queue, awdesk, a llama-server). The awdk daemon is the ONE loader for
   // them (GET /components); the shell asks it rather than re-reading manifests,
   // and says so when it is not running instead of listing nothing.
   if (args[0] === 'components' || args[0] === 'component') {

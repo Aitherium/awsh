@@ -286,7 +286,7 @@ export function isAdkAvailable(): boolean {
  *   5. Detect system info
  *   6. Register endpoint
  *   7. Sync workspace
- *   8. Run 'adk quickstart-local' (bootstrap Ollama + model)
+ *   8. Run 'adk quickstart-local' (bootstrap llama.cpp + GGUF model)
  *   9. Persist workspace config
  *   10. Print success message
  */
@@ -484,7 +484,7 @@ export async function runWizard(
   if (adkAvailable) {
     console.log();
     console.log(chalk.dim('  Running: adk quickstart-local'));
-    console.log(chalk.dim('  (This bootstraps Ollama and downloads a model — may take a few minutes)'));
+    console.log(chalk.dim('  (This bootstraps llama.cpp and downloads a GGUF model — may take a few minutes)'));
     console.log();
     try {
       execSync('adk quickstart-local', { stdio: 'inherit' });

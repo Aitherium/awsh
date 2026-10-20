@@ -7681,16 +7681,12 @@ COMMANDS['install'] = {
         if (vramMb >= 7500) {
           profile = 'personal-gpu';
           console.log(chalk.cyan(`  GPU detected (${vramMb}MB) -> vLLM AWQ profile`));
-        } else if (vramMb >= 5500) {
-          profile = 'personal-ollama';
-          console.log(chalk.cyan(`  GPU detected (${vramMb}MB) -> Ollama GPU profile`));
         } else {
-          profile = 'personal-cpu';
-          console.log(chalk.yellow(`  GPU too small (${vramMb}MB) -> CPU profile`));
+          console.log(chalk.yellow(`  GPU too small (${vramMb}MB) -> no local model profile`));
+          console.log(chalk.yellow('  Inference routes through MicroScheduler to the fleet or a llama.cpp node.'));
         }
       } catch {
-        profile = 'personal-cpu';
-        console.log(chalk.yellow('  No GPU detected -> CPU inference profile'));
+        console.log(chalk.yellow('  No GPU detected -> no local model profile; inference routes through MicroScheduler.'));
       }
     }
 
@@ -7765,23 +7761,6 @@ COMMANDS['install'] = {
       spinner.succeed('Genesis is healthy');
     } else {
       spinner.warn('Genesis did not become healthy in 90s (services may still be starting)');
-    }
-
-    // Step 6b: Pull Nemotron model for Ollama profiles
-    if (profile === 'personal-ollama' || profile === 'personal-cpu') {
-      spinner.start('Pulling Nemotron-Orchestrator-8B model...');
-      const container = profile === 'personal-cpu'
-        ? 'aither-ollama-personal-cpu'
-        : 'aither-ollama-personal';
-      try {
-        execSync(
-          `docker exec ${container} ollama pull nemotron-orchestrator:8b-q4_K_M`,
-          { timeout: 600_000, stdio: 'pipe' }
-        );
-        spinner.succeed('Model downloaded');
-      } catch {
-        spinner.warn('Model will download on first use');
-      }
     }
 
     // Step 7: Install extensions via API

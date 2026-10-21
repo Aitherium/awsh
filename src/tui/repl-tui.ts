@@ -9,9 +9,9 @@
  * pickers inside command handlers don't work under blessed — use AITHER_TUI=0
  * for those; everything else runs in-pane.
  */
-import { execSync } from 'node:child_process';
+import { execFile, execSync } from 'node:child_process';
 import { isSecretBearing, redactForHistory } from '../secret-input.js';
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -60,6 +60,10 @@ import {
 import { createChatFormatter } from './chat-formatter.js';
 import { buildRoomPanel } from './room-view.js';
 import { buildStoragePanel, type StoragePanelSnapshot } from './storage-view.js';
+import {
+  attachmentPreamble, buildFilesPanel, buildMemPanel, newestFirst, parseContextCommand,
+  type FileEntry, type MemResult,
+} from './context-view.js';
 import { getStorageNodes } from '../storage-client.js';
 import { fetchRoomSnapshot } from '../room-client.js';
 import { renderPortrait, renderPngFile } from './portrait.js';
@@ -281,6 +285,10 @@ export async function startTuiRepl(client: GenesisClient, config: ShellConfig): 
   }
 
   let avatarPaneOn = false;
+  // /files + /attach: the last listing (so /attach 2 means the 2nd row shown) and the
+  // paths queued for the next message.
+  let lastFiles: FileEntry[] = [];
+  const attachedPaths: string[] = [];
   let lastStatusInfo: StatusInfo | null = null;
 
   /** Re-probe the fleet and repaint the persistent status bar (silent — never dumps
@@ -991,7 +999,74 @@ export async function startTuiRepl(client: GenesisClient, config: ShellConfig): 
     surface.outputLine(chalk.bold('Keys: ') + chalk.dim('Edit: ←/→ move · Ctrl+A/E line start/end · Ctrl+W del word · Ctrl+U/K kill · Home/End (empty line=scroll) | Panes: wheel/PgUp scroll · Ctrl+←/→ resize split · Ctrl+T trace · Ctrl+E expand all · click thread | Ctrl+C abort/exit · Tab complete'));
     surface.outputLine(chalk.dim('/ picker · /cmd · @agent route · @think/@research deep · ! shell · cmd & background · /jobs · exit'));
     surface.outputLine(chalk.dim('Live views: Ctrl+A sense · Ctrl+F flame · Ctrl+N neurons · Ctrl+R reasoning · Ctrl+K graph · Ctrl+P portrait (docks Aither inline) · /avatar [list|<name>] · /voice'));
+    surface.outputLine(chalk.dim('/mem <query> search agent memory · /files [N] newest Downloads · /attach 1 3 send them with your next message'));
     surface.outputLine(chalk.dim('/relay [#channel]  native group chat (humans + agents) · /relay join #x · /relay channels [scope] · scroll up = older · /relay more · /leave'));
+    surface.focusInput();
+  }
+
+  function filesDir(): string {
+    return process.env.AITHER_FILES_DIR || join(homedir(), 'Downloads');
+  }
+
+  function listFiles(dir: string, count: number): FileEntry[] {
+    const out: FileEntry[] = [];
+    for (const name of readdirSync(dir)) {
+      if (name.startsWith('.') || name.toLowerCase() === 'desktop.ini') continue;
+      try {
+        const full = join(dir, name);
+        const st = statSync(full);
+        if (st.isFile()) out.push({ path: full, name, size: st.size, mtimeMs: st.mtimeMs });
+      } catch { /* vanished or locked: skip */ }
+    }
+    return newestFirst(out, count);
+  }
+
+  function recallMemory(query: string): Promise<MemResult> {
+    // awm owns scope resolution (AWM_SCOPE or its configured default); argv, not a shell.
+    return new Promise((resolve) => {
+      execFile('awm', ['recall', '--query', query], { timeout: 30_000, windowsHide: true, maxBuffer: 4 << 20 },
+        (err, stdout, stderr) => {
+          if (err) {
+            const msg = (err as NodeJS.ErrnoException).code === 'ENOENT' ? 'awm not found' : (String(stderr).trim().split('\n').pop() || err.message);
+            resolve({ ok: false, query, error: msg });
+          } else {
+            resolve({ ok: true, query, lines: String(stdout).split(/\r?\n/) });
+          }
+        });
+    });
+  }
+
+  async function handleContext(name: string, args: string): Promise<void> {
+    const cmd = parseContextCommand(name, args);
+    const w = Math.max(30, (process.stdout.columns || 100) - 6);
+    if (!cmd) return;
+    if (cmd.kind === 'usage') { surface.outputLine(chalk.yellow(cmd.message)); surface.focusInput(); return; }
+    if (cmd.kind === 'mem') {
+      surface.outputLine(chalk.dim(`searching memory for "${cmd.query}"…`));
+      const res = await recallMemory(cmd.query);
+      await surface.showViewer(`Memory: ${cmd.query}`, buildMemPanel(res, w));
+      return;
+    }
+    if (cmd.kind === 'files') {
+      const dir = filesDir();
+      try { lastFiles = listFiles(dir, cmd.count); }
+      catch (e) { surface.outputLine(chalk.red(`cannot read ${dir}: ${(e as Error).message}`)); surface.focusInput(); return; }
+      await surface.showViewer(`Files: ${dir}`, buildFilesPanel(dir, lastFiles, w, attachedPaths));
+      return;
+    }
+    if (cmd.kind === 'attach-clear') { attachedPaths.length = 0; surface.outputLine(chalk.dim('attachments cleared')); surface.focusInput(); return; }
+    if (cmd.kind === 'attach-list') {
+      surface.outputLine(attachedPaths.length ? chalk.cyan(`queued for next message:\n${attachedPaths.map(p => '  ' + p).join('\n')}`) : chalk.dim('nothing queued · /files then /attach <n>'));
+      surface.focusInput(); return;
+    }
+    if (!lastFiles.length) { surface.outputLine(chalk.yellow('run /files first, then /attach <n>')); surface.focusInput(); return; }
+    const bad = cmd.indexes.filter(i => i > lastFiles.length);
+    if (bad.length) { surface.outputLine(chalk.yellow(`no file #${bad.join(', #')} in the last /files list`)); surface.focusInput(); return; }
+    for (const i of cmd.indexes) {
+      const p = lastFiles[i - 1].path;
+      if (!attachedPaths.includes(p)) attachedPaths.push(p);
+    }
+    surface.outputLine(chalk.cyan(`${attachedPaths.length} file(s) queued for your next message`));
     surface.focusInput();
   }
 
@@ -1417,6 +1492,9 @@ export async function startTuiRepl(client: GenesisClient, config: ShellConfig): 
     if (!name) { await openPicker(); return; }
     if (name === 'clear' || name === 'cls') { surface.clearPanes(); idleStatus(); surface.focusInput(); return; }
     if (name === 'help') { showHelp(); return; }
+    if (name === 'mem' || name === 'memory' || name === 'files' || name === 'attach') {
+      await handleContext(name, args); return;
+    }
     if (name === 'view' || name === 'open' || name === 'cat') { await handleView(args); return; }
     if (name === 'edit' || name === 'e' || name === 'nano') { await handleEdit(args); return; }
     if (name === 'jobs') { await handleJobs(args); return; }
@@ -1554,6 +1632,8 @@ export async function startTuiRepl(client: GenesisClient, config: ShellConfig): 
   }
 
   async function runChat(input: string, bg = false): Promise<string | null> {
+    // /attach: the queued paths ride this message, then the queue empties.
+    if (attachedPaths.length) { input = attachmentPreamble(attachedPaths) + input; attachedPaths.length = 0; }
     // Resolve @mentions (agent routes) vs @strategy triggers.
     let agent = config.defaultAgent;
     const resolved: string[] = [];

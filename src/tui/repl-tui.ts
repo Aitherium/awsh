@@ -11,9 +11,9 @@
  */
 import { execFile, execSync } from 'node:child_process';
 import { isSecretBearing, redactForHistory } from '../secret-input.js';
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
-import { homedir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { appendFileSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
+import { basename, dirname, join, resolve as resolvePath } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import chalk from 'chalk';
 import { stripFenceDelimiters } from './chat-formatter.js';
@@ -61,10 +61,11 @@ import { createChatFormatter } from './chat-formatter.js';
 import { buildRoomPanel } from './room-view.js';
 import { buildStoragePanel, type StoragePanelSnapshot } from './storage-view.js';
 import {
-  attachmentPreamble, buildFilesPanel, buildMemPanel, newestFirst, parseContextCommand,
-  type FileEntry, type MemResult,
+  attachmentPreamble, buildFilesPanel, buildMemPanel, buildNexusPanel, buildStrataPanel, buildToolPanel,
+  CONTEXT_COMMANDS, newestFirst, parseContextCommand,
+  type FileEntry, type MemResult, type NexusResult, type StrataResult, type ToolRun,
 } from './context-view.js';
-import { getStorageNodes } from '../storage-client.js';
+import { getStorageNodes, searchStorageFiles } from '../storage-client.js';
 import { fetchRoomSnapshot } from '../room-client.js';
 import { renderPortrait, renderPngFile } from './portrait.js';
 import { emotionFromAffect } from './avatar.js';
@@ -1000,6 +1001,7 @@ export async function startTuiRepl(client: GenesisClient, config: ShellConfig): 
     surface.outputLine(chalk.dim('/ picker · /cmd · @agent route · @think/@research deep · ! shell · cmd & background · /jobs · exit'));
     surface.outputLine(chalk.dim('Live views: Ctrl+A sense · Ctrl+F flame · Ctrl+N neurons · Ctrl+R reasoning · Ctrl+K graph · Ctrl+P portrait (docks Aither inline) · /avatar [list|<name>] · /voice'));
     surface.outputLine(chalk.dim('/mem <query> search agent memory · /files [N] newest Downloads · /attach 1 3 send them with your next message'));
+    surface.outputLine(chalk.dim('/graph <q> code graph · /strata <name> files on your machines · /nexus <q> platform memory · /share <path> · /seal <folder> · /git'));
     surface.outputLine(chalk.dim('/relay [#channel]  native group chat (humans + agents) · /relay join #x · /relay channels [scope] · scroll up = older · /relay more · /leave'));
     surface.focusInput();
   }
@@ -1036,11 +1038,94 @@ export async function startTuiRepl(client: GenesisClient, config: ShellConfig): 
     });
   }
 
+  /** Run one brick (argv, never a shell). ENOENT = not installed, reported as such. */
+  function runBrick(tool: string, argv: string[], timeoutMs = 60_000): Promise<ToolRun> {
+    return new Promise((resolve) => {
+      execFile(tool, argv, { timeout: timeoutMs, windowsHide: true, maxBuffer: 8 << 20 }, (err, stdout, stderr) => {
+        if (err && (err as NodeJS.ErrnoException).code === 'ENOENT') { resolve({ ok: false, tool, notInstalled: true }); return; }
+        if (err) {
+          const why = (err as any).killed ? `timed out after ${Math.round(timeoutMs / 1000)}s` : (String(stderr).trim().split('\n').pop() || err.message);
+          resolve({ ok: false, tool, error: why, stdout: String(stdout), stderr: String(stderr) });
+          return;
+        }
+        resolve({ ok: true, tool, stdout: String(stdout), stderr: String(stderr) });
+      });
+    });
+  }
+
+  /** awshare publishes a DIRECTORY; a single file is staged into a temp folder first. */
+  function shareSource(path: string): string {
+    const full = resolvePath(path);
+    if (statSync(full).isDirectory()) return full;
+    const stage = join(mkdtempSync(join(tmpdir(), 'awsh-share-')), basename(full).replace(/\.[^.]+$/, '') || 'file');
+    mkdirSync(stage, { recursive: true });
+    copyFileSync(full, join(stage, basename(full)));
+    return stage;
+  }
+
+  async function handleKnowledge(cmd: ReturnType<typeof parseContextCommand>, w: number): Promise<boolean> {
+    if (!cmd) return false;
+    if (cmd.kind === 'graph') {
+      surface.outputLine(chalk.dim(`asking the code graph: "${cmd.query}"…`));
+      const run = await runBrick('awgraph', ['query', cmd.query, '-k', '10'], 120_000);
+      await surface.showViewer(`Graph: ${cmd.query}`, buildToolPanel(`awgraph · "${cmd.query}"`, run, w));
+      return true;
+    }
+    if (cmd.kind === 'git') {
+      const run = await runBrick('awgit', ['status']);
+      await surface.showViewer('awgit status', buildToolPanel(`awgit status · ${process.cwd()}`, run, w));
+      return true;
+    }
+    if (cmd.kind === 'strata') {
+      surface.outputLine(chalk.dim(`searching files on your machines for "${cmd.query}"…`));
+      const r = await searchStorageFiles(client, { q: cmd.query, limit: 40 });
+      const res: StrataResult = r.ok
+        ? { ok: true, query: cmd.query, items: r.data?.items || [], partial: !!r.data?.partial }
+        : { ok: false, query: cmd.query, error: `${r.error || 'request failed'}${r.status ? ` (HTTP ${r.status})` : ''}` };
+      await surface.showViewer(`Strata: ${cmd.query}`, buildStrataPanel(res, w));
+      return true;
+    }
+    if (cmd.kind === 'nexus') {
+      surface.outputLine(chalk.dim(`recalling platform memory for "${cmd.query}"…`));
+      // The same Genesis route /memory recall uses: Spirit + Nexus + working memory + graph.
+      let res: NexusResult;
+      try {
+        const r: any = await client.post('/external/memory/recall', { query: cmd.query });
+        res = r && (r.error || r.detail) && !r.memories && !r.results
+          ? { ok: false, query: cmd.query, error: String(r.error || r.detail) }
+          : { ok: true, query: cmd.query, memories: r?.memories || r?.results || [] };
+      } catch (e) {
+        res = { ok: false, query: cmd.query, error: (e as Error).message };
+      }
+      await surface.showViewer(`Nexus: ${cmd.query}`, buildNexusPanel(res, w));
+      return true;
+    }
+    if (cmd.kind === 'share' || cmd.kind === 'seal') {
+      const full = resolvePath(cmd.path);
+      if (!existsSync(full)) { surface.outputLine(chalk.red(`no such path: ${full}`)); surface.focusInput(); return true; }
+      if (cmd.kind === 'seal') {
+        if (!statSync(full).isDirectory()) { surface.outputLine(chalk.yellow('awseal signs a folder: /seal <folder>')); surface.focusInput(); return true; }
+        const run = await runBrick('awseal', ['sign', full]);
+        await surface.showViewer(`Seal: ${full}`, buildToolPanel(`awseal sign · ${full}`, run, w));
+        return true;
+      }
+      let src: string;
+      try { src = shareSource(full); } catch (e) { surface.outputLine(chalk.red(`cannot stage ${full}: ${(e as Error).message}`)); surface.focusInput(); return true; }
+      const out = join(homedir(), '.aither', 'shares', `${basename(src)}-${Date.now()}`);
+      const run = await runBrick('awshare', ['publish', src, '--out', out], 300_000);
+      if (run.ok) run.stdout = `${run.stdout || ''}\nbundle: ${out}`;
+      await surface.showViewer(`Share: ${full}`, buildToolPanel(`awshare publish · ${full}`, run, w));
+      return true;
+    }
+    return false;
+  }
+
   async function handleContext(name: string, args: string): Promise<void> {
     const cmd = parseContextCommand(name, args);
     const w = Math.max(30, (process.stdout.columns || 100) - 6);
     if (!cmd) return;
     if (cmd.kind === 'usage') { surface.outputLine(chalk.yellow(cmd.message)); surface.focusInput(); return; }
+    if (await handleKnowledge(cmd, w)) return;
     if (cmd.kind === 'mem') {
       surface.outputLine(chalk.dim(`searching memory for "${cmd.query}"…`));
       const res = await recallMemory(cmd.query);
@@ -1059,6 +1144,7 @@ export async function startTuiRepl(client: GenesisClient, config: ShellConfig): 
       surface.outputLine(attachedPaths.length ? chalk.cyan(`queued for next message:\n${attachedPaths.map(p => '  ' + p).join('\n')}`) : chalk.dim('nothing queued · /files then /attach <n>'));
       surface.focusInput(); return;
     }
+    if (cmd.kind !== 'attach') return;
     if (!lastFiles.length) { surface.outputLine(chalk.yellow('run /files first, then /attach <n>')); surface.focusInput(); return; }
     const bad = cmd.indexes.filter(i => i > lastFiles.length);
     if (bad.length) { surface.outputLine(chalk.yellow(`no file #${bad.join(', #')} in the last /files list`)); surface.focusInput(); return; }
@@ -1492,7 +1578,7 @@ export async function startTuiRepl(client: GenesisClient, config: ShellConfig): 
     if (!name) { await openPicker(); return; }
     if (name === 'clear' || name === 'cls') { surface.clearPanes(); idleStatus(); surface.focusInput(); return; }
     if (name === 'help') { showHelp(); return; }
-    if (name === 'mem' || name === 'memory' || name === 'files' || name === 'attach') {
+    if (CONTEXT_COMMANDS.includes(name)) {
       await handleContext(name, args); return;
     }
     if (name === 'view' || name === 'open' || name === 'cat') { await handleView(args); return; }

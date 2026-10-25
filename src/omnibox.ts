@@ -468,7 +468,9 @@ export function selfTest(): string[] {
 
   // 1. A healthy box installs; the measured pathological one refuses WITH a remedy.
   if (!judgeOmnibox(81, []).ok) failures.push('81 ms should be judged installable');
-  const bad = judgeOmnibox(60000, ['D:\\AitherOS-Fresh']);
+  // Fixture paths are neutral on purpose: a literal of our own tree here read as a
+  // real hardcoded path to check_awsh_backend_ladder ABL003.
+  const bad = judgeOmnibox(60000, ['Z:\\repo-checkout']);
   if (bad.ok) failures.push('60000 ms must NOT be judged installable');
   if (!bad.remedy) failures.push('a refusal with no remedy is a dead end, not a verdict');
 
@@ -480,7 +482,7 @@ export function selfTest(): string[] {
   if (classifyModulePath('C:\\WINDOWS\\...\\Modules', 90, 88)) {
     failures.push('a genuine module directory must not be flagged');
   }
-  if (!classifyModulePath('D:\\AitherOS-Fresh', 100, 1)) {
+  if (!classifyModulePath('Z:\\repo-checkout', 100, 1)) {
     failures.push('a source tree on PSModulePath must be flagged');
   }
   if (classifyModulePath('C:\\some\\dir', 5, 0)) {

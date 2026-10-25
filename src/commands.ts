@@ -8432,6 +8432,19 @@ COMMANDS['spend'] = {
   },
 };
 
+// `/posture` (alias `/house`) — the house posture (Shop open / After hours / Game on / Dark /
+// On schedule) and the on-demand wake groups, through the gateway's fleet_posture_* and
+// fleet_group_* tools. Logic in posture-command.ts, pinned by test/posture-command.test.ts.
+// A typed slash command is the consent, like /fleet.
+COMMANDS['posture'] = {
+  description: 'House posture + wake groups: /posture [shop|after|game|dark|auto] | wake|sleep <group>',
+  usage: '/posture [shop|after|game|dark|auto [--until 23:30|2h]] | wake <group> | sleep <group> [--json]',
+  handler: async (_client: GenesisClient, args: string) => {
+    const { runPostureCommand } = await import('./posture-command.js');
+    await runPostureCommand(args.trim() ? args.trim().split(/\s+/) : []);
+  },
+};
+
 // `/rc [status|stop]` — remote control, like Claude Code's /remote-control: the same
 // `adk rc` as `awsh rc` (rc-command.ts; no credential handling here), held in the
 // background so the prompt stays usable, with the sessions URL and a QR to scan.
@@ -8482,6 +8495,7 @@ export const COMMAND_ALIASES: Readonly<Record<string, string>> = Object.freeze({
   gaming: 'gpu',
   gen: 'imagine',
   generate: 'imagine',
+  house: 'posture',
   lb: 'lockbox',
   mon: 'monitor',
   nb: 'notebook',

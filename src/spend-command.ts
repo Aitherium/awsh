@@ -219,7 +219,7 @@ export function toolPayload(result: McpCallResult | null | undefined): unknown {
   return null;
 }
 
-function readBearer(): string {
+export function readBearer(): string {
   const env = (process.env.AITHER_MCP_KEY || '').trim();
   if (env) return env;
   try { return readFileSync(BEARER_PATH, 'utf-8').trim(); } catch { return ''; }

@@ -24,6 +24,7 @@ import type { ShellConfig } from './config.js';
 // TC is re-exported from theme for the remaining local rgb() chrome below.
 import { TC, accent, gradient } from './theme.js';
 import { spendBarSegment } from './spend-command.js';
+import { postureBarSegment, type PostureWord } from './posture-command.js';
 
 export interface WelcomeParams {
   host: string;
@@ -310,6 +311,9 @@ export interface StatusInfo {
   /** Cloud LLM spend, `$X.XX/24h` (+ `ds $B low`), from ~/.aither/spend-cache.json.
    *  Absent when nothing was ever measured — never a zero nobody measured. */
   spend?: { text: string; low: boolean };
+  /** The house posture in Veil's words (`Dark`, `Shop open`, ...), from
+   *  ~/.aither/posture-cache.json. Absent when nothing was measured in the last hour. */
+  posture?: { text: string; word: PostureWord | null; alert: boolean };
 }
 
 const ROLE_ORDER = ['orchestrator', 'reasoning', 'perception', 'embeddings', 'fast-context', 'cloud', 'llm'];
@@ -470,6 +474,10 @@ export async function gatherStatus(client: GenesisClient, config: ShellConfig): 
     const spend = spendBarSegment();
     if (spend.text) info.spend = spend;
   } catch { /* spend is best-effort; the bar never dies over it */ }
+  try {
+    const posture = postureBarSegment();
+    if (posture.text) info.posture = posture;
+  } catch { /* posture is best-effort too */ }
 
   return info;
 }
@@ -524,6 +532,15 @@ export function formatStatusBar(info: StatusInfo): BarSegment[] {
   if (info.spend?.text) {
     const paint = info.spend.low ? chalk.yellow : chalk.dim;
     push('spend', paint('◎'), '◎', paint(info.spend.text), info.spend.text);
+  }
+
+  // posture — the house word (click → /posture); red when a tenant, App or Hearth surface is down
+  if (info.posture?.text) {
+    const w = info.posture.word;
+    const dotPaint = info.posture.alert ? chalk.red
+      : w === 'shop' ? chalk.green : w === 'game' ? chalk.magenta
+        : w === 'dark' ? chalk.gray : w === 'after' ? chalk.yellow : chalk.cyan;
+    push('posture', dotPaint('●'), '●', chalk.dim(info.posture.text), info.posture.text);
   }
 
   // Aither — click or Ctrl+P to toggle the inline portrait (keep at end)

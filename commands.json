@@ -217,6 +217,14 @@
       "aliases": []
     },
     {
+      "name": "posture",
+      "category": "core",
+      "description": "House posture + wake groups: /posture [shop|after|game|dark|auto] | wake|sleep <group>",
+      "aliases": [
+        "house"
+      ]
+    },
+    {
       "name": "preview",
       "category": "core",
       "description": "List sandbox sessions or open one in ForgeIDE preview",

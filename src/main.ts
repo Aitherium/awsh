@@ -335,7 +335,15 @@ async function main() {
     // persist it -- an install that leaves a known-bad endpoint in place has
     // not finished.
     const ep = steps.find(s => s.name === 'inference endpoint') as { url?: string } | undefined;
-    if (ep?.url && ep.url !== cfg0.genesisUrl) {
+    // Only a LOCAL endpoint is worth pinning. A pinned remote url disables the
+    // backend ladder for good, and the cloud rung is reached without a pin anyway:
+    // 2026-10-25 a setup run while the daemon was down wrote api_url:
+    // mcp.aitherium.com, and every omnibox line since went to the gateway's
+    // tool-less chat ("no direct way to fetch current news") while the local
+    // daemon sat healthy with web_search registered.
+    if (ep?.url && !_isPrivateHost(ep.url)) {
+      console.log(chalk.dim(`        ${ep.url} answered; not pinned (remote -- the ladder reaches it unpinned)`));
+    } else if (ep?.url && ep.url !== cfg0.genesisUrl) {
       const { writeFileSync: wf, readFileSync: rf, existsSync: ex } = await import('node:fs');
       const { join: j } = await import('node:path');
       const { homedir: hd } = await import('node:os');
@@ -1115,6 +1123,12 @@ $rows | ForEach-Object { [Console]::Out.WriteLine("PATH=" + $_) }`;
   if (args[0] && args[0].toLowerCase() === 'spend') {
     const { runSpendCommand } = await import('./spend-command.js');
     process.exitCode = await runSpendCommand(args.slice(1));
+    return;
+  }
+  // `aither posture|house [word|wake <g>|sleep <g>] [--json]` -- house posture + wake groups.
+  if (args[0] && ['posture', 'house'].includes(args[0].toLowerCase())) {
+    const { runPostureCommand } = await import('./posture-command.js');
+    process.exitCode = await runPostureCommand(args.slice(1));
     return;
   }
   if (args[0] && ['shop', 'license'].includes(args[0].toLowerCase())) {

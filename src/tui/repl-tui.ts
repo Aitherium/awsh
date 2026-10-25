@@ -659,6 +659,7 @@ export async function startTuiRepl(client: GenesisClient, config: ShellConfig): 
       if (key === 'brand') { void openPicker(); return; }
       if (key === 'portrait') { openOverlay('portrait'); return; }
       if (key === 'spend') { void runCommand('/spend'); return; }
+      if (key === 'posture') { void runCommand('/posture'); return; }
       if (lastStatusInfo) void surface.showViewer('⬢ FLEET STATUS', formatStatusLines(lastStatusInfo));
       refreshStatusBar();
     },

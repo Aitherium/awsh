@@ -11,17 +11,17 @@ import { join } from 'node:path';
 import { bootWaitPlan, daemonStartCandidates } from '../src/backend-resolver.js';
 import { cloudSignInHint } from '../src/config.js';
 
-test('bootWaitPlan: default waits 25s, polls every 1s', () => {
+test('bootWaitPlan: default waits 120s, polls every 1s', () => {
   const p = bootWaitPlan({});
-  assert.equal(p.waitMs, 25_000);
+  assert.equal(p.waitMs, 120_000);
   assert.equal(p.pollMs, 1000);
 });
 
 test('bootWaitPlan: AITHERSHELL_ADK_BOOT_WAIT_S overrides, 0 disables the wait, junk falls back', () => {
   assert.equal(bootWaitPlan({ AITHERSHELL_ADK_BOOT_WAIT_S: '40' }).waitMs, 40_000);
   assert.equal(bootWaitPlan({ AITHERSHELL_ADK_BOOT_WAIT_S: '0' }).waitMs, 0);
-  assert.equal(bootWaitPlan({ AITHERSHELL_ADK_BOOT_WAIT_S: 'soon' }).waitMs, 25_000);
-  assert.equal(bootWaitPlan({ AITHERSHELL_ADK_BOOT_WAIT_S: '-3' }).waitMs, 25_000);
+  assert.equal(bootWaitPlan({ AITHERSHELL_ADK_BOOT_WAIT_S: 'soon' }).waitMs, 120_000);
+  assert.equal(bootWaitPlan({ AITHERSHELL_ADK_BOOT_WAIT_S: '-3' }).waitMs, 120_000);
 });
 
 test('daemonStartCandidates: the hidden scheduled-task payload outranks the repo launcher', () => {

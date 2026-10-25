@@ -29,11 +29,14 @@ import { probeHealth } from './status-banner.js';
  *  Pure, so the test can pin it. Measured 2026-09-19: a cold daemon binds in ~13 s
  *  once its boot no longer blocks on the gateway attach; 25 s covers a slow disk. The
  *  old 2 x 1 s wait was guaranteed to expire, so every cold start paid the probe AND
- *  landed on the cloud rung -- which then demanded a sign-in the owner never needed. */
+ *  landed on the cloud rung -- which then demanded a sign-in the owner never needed.
+ *  2026-10-25: with the default agent's tool packs loading (aither identity), a cold
+ *  daemon took ~95 s, so 25 s sent the first line after every restart to the cloud
+ *  rung. 120 s covers it; the dots keep printing so the wait is never silent. */
 export function bootWaitPlan(env: NodeJS.ProcessEnv = process.env): { waitMs: number; pollMs: number } {
   const text = (env.AITHERSHELL_ADK_BOOT_WAIT_S || '').trim();
   const raw = Number(text);
-  const waitS = text !== '' && Number.isFinite(raw) && raw >= 0 ? raw : 25;
+  const waitS = text !== '' && Number.isFinite(raw) && raw >= 0 ? raw : 120;
   return { waitMs: Math.round(waitS * 1000), pollMs: 1000 };
 }
 

@@ -3824,51 +3824,13 @@ const COMMANDS: Record<string, Command> = {
     },
   },
 
-  secrets: {
-    description: 'Manage secrets vault',
-    usage: '/secrets [list|get <key>|set <key> <value>|delete <key>]',
-    handler: async (client: GenesisClient, args: string) => {
-      const parts = args.trim().split(/\s+/);
-      const sub = (parts[0] || 'list').toLowerCase();
-      if (sub === 'list') {
-        const spinner = ora('Loading secrets...').start();
-        try {
-          const result = await client.get('/secrets') as any;
-          spinner.stop();
-          const keys = result?.keys || result?.secrets || [];
-          if (!keys.length) { console.log(chalk.dim('  Vault is empty.')); return; }
-          console.log();
-          for (const k of keys) { console.log(`  ${chalk.cyan('-')} ${typeof k === 'string' ? k : k.key || k.name}`); }
-          console.log();
-        } catch (e: any) { spinner.stop(); console.log(chalk.red(`  Error: ${e.message}`)); }
-      } else if (sub === 'get' && parts[1]) {
-        const spinner = ora(`Reading ${parts[1]}...`).start();
-        try {
-          const result = await client.get(`/secrets/${parts[1]}`) as any;
-          spinner.stop();
-          const val = result?.value ?? result?.secret ?? '';
-          console.log(`  ${chalk.cyan(parts[1])} = ${val ? chalk.green(val) : chalk.dim('(empty)')}`);
-        } catch (e: any) { spinner.stop(); console.log(chalk.red(`  Error: ${e.message}`)); }
-      } else if (sub === 'set' && parts[1] && parts[2]) {
-        const value = parts.slice(2).join(' ');
-        const spinner = ora(`Storing ${parts[1]}...`).start();
-        try {
-          await client.post('/secrets', { key: parts[1], value });
-          spinner.stop();
-          console.log(chalk.green(`  ${parts[1]} stored.`));
-        } catch (e: any) { spinner.stop(); console.log(chalk.red(`  Error: ${e.message}`)); }
-      } else if (sub === 'delete' && parts[1]) {
-        const spinner = ora(`Deleting ${parts[1]}...`).start();
-        try {
-          await client.post(`/secrets/${parts[1]}/delete`, {});
-          spinner.stop();
-          console.log(chalk.green(`  ${parts[1]} deleted.`));
-        } catch (e: any) { spinner.stop(); console.log(chalk.red(`  Error: ${e.message}`)); }
-      } else {
-        console.log(chalk.dim('  Usage: /secrets [list|get <key>|set <key> <value>|delete <key>]'));
-      }
-    },
-  },
+  // `/secrets` used to live here: list|get|set|delete over the same AitherSecrets
+  // routes. Folded into `/secret` (secret-command.ts), which is the same four
+  // verbs plus the Lockbox and Proton Pass scopes, and which fixes two defects
+  // this copy had: `set` posted `{key, value}` while the service reads `name`
+  // (so a value could be accepted and stored under the wrong field), and the
+  // value came from argv — echoed to the terminal AND appended to the history
+  // file. `secrets` survives as an alias in COMMAND_ALIASES.
 
   checkpoints: {
     description: 'List available image generation models (checkpoints + LoRAs)',
@@ -7359,6 +7321,27 @@ COMMANDS['lockbox'] = {
   },
 };
 
+// `/secret [ls|get|set|rm|status|personal|workspace|proton]` — the aithersecrets /
+// lockbox / Proton Pass vault. Not to be confused with `/lockbox` above, which is
+// private PROMPTS. Until now awsh could REFUSE to leak a credential
+// (credential-guard.ts) and read one without echoing it (secret-input.ts) but had
+// no verb to put one in the vault at all: `adk vault` and the Python shell's
+// `/secret` plugin were the only doors. Logic in secret-command.ts; the value is
+// always prompted hidden, never taken from argv (argv is echoed AND appended to
+// the history file).
+COMMANDS['secret'] = {
+  description: 'The vault: AitherSecrets (machine), Lockbox (personal/workspace), Proton Pass',
+  usage: '/secret [ls|get <name>|set <name>|rm <name>|status|personal …|workspace …|proton …]',
+  handler: async (client: GenesisClient, args: string) => {
+    const { runSecretCommand } = await import('./secret-command.js');
+    const { askHidden } = await import('./secret-input.js');
+    await runSecretCommand(parseQuotedArgs(args.trim()), {
+      backend: client as any,
+      askHidden,
+    });
+  },
+};
+
 // ─── Agent Platform Commands ────────────────────────────────────────
 
 COMMANDS['notebook'] = {
@@ -8502,6 +8485,10 @@ export const COMMAND_ALIASES: Readonly<Record<string, string>> = Object.freeze({
   persona: 'desk',
   prod: 'products',
   'resume-all': 'resume',
+  // The vault had three names in the tree (awdk `adk vault`, the Python shell's
+  // `/secret` and `/vault`). One command, two spellings, declared only here.
+  secrets: 'secret',
+  vault: 'secret',
 });
 
 const ownCommand = (k: string): boolean => Object.prototype.hasOwnProperty.call(COMMANDS, k);

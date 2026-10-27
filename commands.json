@@ -291,6 +291,15 @@
       "aliases": []
     },
     {
+      "name": "secret",
+      "category": "core",
+      "description": "The vault: AitherSecrets (machine), Lockbox (personal/workspace), Proton Pass",
+      "aliases": [
+        "secrets",
+        "vault"
+      ]
+    },
+    {
       "name": "sessions",
       "category": "shell",
       "description": "List or inspect saved session traces",

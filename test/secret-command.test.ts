@@ -128,12 +128,12 @@ test('a transport failure never puts the value into the error line', async () =>
   assert.equal(h.values.length, 0);
 });
 
-test('personal secrets refuse get out loud instead of inventing a read route', async () => {
-  const backend = fakeBackend({ '/api/genesis/lockbox/user': { secrets: [{ name: 'GITHUB_TOKEN', stored: true }] } });
+test('personal get reveals one value through the audit-logged route', async () => {
+  const backend = fakeBackend({ '/api/genesis/lockbox/user/GITHUB_TOKEN': { success: true, value: 'gh-value' } });
   const h = harness({ backend });
-  assert.equal(await runSecretCommand(['personal', 'get', 'GITHUB_TOKEN'], h.deps), 2);
-  assert.equal(backend.calls.length, 0, 'a refused read must not call the server');
-  assert.match(h.lines.join('\n'), /write-only/);
+  assert.equal(await runSecretCommand(['personal', 'get', 'GITHUB_TOKEN'], h.deps), 0);
+  assert.deepEqual(h.values, ['gh-value']);
+  assert.ok(backend.calls[0].startsWith('/api/genesis/lockbox/user/GITHUB_TOKEN'));
 });
 
 test('personal ls lists names from the wrap shape', async () => {

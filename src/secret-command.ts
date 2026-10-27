@@ -8,8 +8,7 @@
  *               credentials this box runs on. This is what `adk vault` and the
  *               Python shell's `/secret` plugin talk to; awsh had no path to it.
  *   personal    The caller's own Lockbox (GET /api/genesis/lockbox/user).
- *               WRITE-ONLY by design — the read route does not exist, so
- *               `personal get` refuses instead of pretending.
+ *               `get` reveals one value through the audit-logged read route.
  *   workspace   Workspace-scoped secrets (GET /api/genesis/workspace-secrets/*),
  *               owner/admin, every value read audit-logged.
  *   proton      Proton Pass, READ-THROUGH from the export kept in AitherSecrets.
@@ -255,9 +254,20 @@ export async function runSecretCommand(argv: string[], deps: SecretDeps = {}): P
       const b = needBackend(); if (!b) return 1
       const verb = positional[1] || 'ls'
       if (verb === 'get' || verb === 'show') {
-        log(chalk.yellow('  personal secrets are write-only by design — there is no read route.'))
-        log(chalk.dim('  To change one, set it again; to use it, a service reads it by name.'))
-        return 2
+        const name = positional[2]
+        if (!name) { log(chalk.yellow('  usage: /secret personal get <name>')); return 2 }
+        if (!validSecretName(name)) { log(chalk.yellow('  that is not a secret name.')); return 2 }
+        // The reveal route (GET /api/genesis/lockbox/user/{name}) is audit-logged
+        // server-side on every read. Until it existed the personal Lockbox was
+        // write-only, which is a locker rather than a manager.
+        const body = await b.get(`/api/genesis/lockbox/user/${encodeURIComponent(name)}`)
+        const value = (body as { value?: unknown })?.value
+        if (typeof value !== 'string') {
+          log(chalk.yellow(`  ${name} is not in your Lockbox.`))
+          return 1
+        }
+        write(value)
+        return 0
       }
       if (verb === 'ls' || verb === 'list') {
         const names = parsePersonalSecrets(await b.get('/api/genesis/lockbox/user'))

@@ -52,6 +52,56 @@ export interface RelayChannel {
   user_count?: number;
 }
 
+/** One direct message as the relay stores it (AitherRelay `DirectMessage`). */
+export interface RelayDm {
+  id?: string;
+  from_nick: string;
+  to_nick: string;
+  content: string;
+  timestamp?: string;
+  agent?: boolean;
+}
+
+/** One DM conversation (GET /v1/dms/partners): who, whether they are on, the last line. */
+export interface RelayDmPartner {
+  nick: string;
+  online?: boolean;
+  last_message?: RelayDm | null;
+}
+
+/** A REST call's outcome: the parsed body, or why it failed in the relay's own words. */
+export type RelayResult<T> = { ok: true; data: T } | { ok: false; status?: number; error: string };
+
+/** A channel as one path segment: '#ops' and 'ops' both name #ops ('#' would end the path). */
+export function channelSegment(channel: string): string {
+  return encodeURIComponent(channel.trim().replace(/^#/, ''));
+}
+
+/** The relay's refusal as one line (pure): FastAPI `detail` (a string, or 422's list). */
+export function relayErrorText(status: number, body: any): string {
+  const d = body?.detail ?? body?.error ?? body?.message;
+  let text = typeof d === 'string' ? d
+    : Array.isArray(d) ? d.map((x: any) => x?.msg || JSON.stringify(x)).join('; ')
+    : '';
+  if (!text) text = `HTTP ${status}`;
+  if (status === 401) text += ' (sign in: awsh login)';
+  return text;
+}
+
+/** Channel rows from GET /v1/channels, whatever envelope the relay used (pure). */
+function toChannels(data: any): RelayChannel[] {
+  const raw = Array.isArray(data) ? data : (data?.channels || data?.items || []);
+  return raw.map((c: any) => ({
+    name: typeof c === 'string' ? c : (c.name || c.channel || c.id),
+    topic: c.topic,
+    mode: c.mode,
+    user_count: c.user_count ?? c.users ?? c.member_count,
+  })).filter((c: RelayChannel) => c.name);
+}
+
+const byTimestamp = (a: { timestamp?: number | string }, b: { timestamp?: number | string }) =>
+  String(a.timestamp ?? '').localeCompare(String(b.timestamp ?? ''));
+
 /** CommunicationCore's relay on a fleet host: root-mounted on 8205, TLS-only (the
  *  shell sets NODE_TLS_REJECT_UNAUTHORIZED=0 for its self-signed cert). */
 export const LOCAL_RELAY_URL = 'wss://127.0.0.1:8205/ws/chat';
@@ -160,15 +210,91 @@ export class RelayClient {
       const u = `${this.httpBase()}/v1/channels?scope=${encodeURIComponent(scope)}&nick=${encodeURIComponent(this.nick)}`;
       const r = await fetch(u, { headers: this.authHeaders(), signal: AbortSignal.timeout(6000) });
       if (!r.ok) return [];
-      const data = await r.json() as any;
-      const raw = Array.isArray(data) ? data : (data.channels || data.items || []);
-      return raw.map((c: any) => ({
-        name: typeof c === 'string' ? c : (c.name || c.channel || c.id),
-        topic: c.topic,
-        mode: c.mode,
-        user_count: c.user_count ?? c.users ?? c.member_count,
-      })).filter((c: RelayChannel) => c.name);
+      return toChannels(await r.json());
     } catch { return []; }
+  }
+
+  /**
+   * One REST call that says why it failed -- the picker helpers above swallow errors,
+   * a one-shot `awsh relay` / `/dm` must not. Off a fleet host the local relay refuses:
+   * a signed-in session then moves to the hosted relay, the same rule the socket follows
+   * (relayFallbackUrl), for the rest of this client's life.
+   */
+  private async rest<T>(method: 'GET' | 'POST', path: string, body?: unknown): Promise<RelayResult<T>> {
+    for (;;) {
+      let r: Response;
+      try {
+        const headers = this.authHeaders();
+        if (body !== undefined) headers['Content-Type'] = 'application/json';
+        r = await fetch(`${this.httpBase()}${path}`, {
+          method, headers,
+          body: body === undefined ? undefined : JSON.stringify(body),
+          signal: AbortSignal.timeout(10000),
+        });
+      } catch (e: any) {
+        const next = relayFallbackUrl(this.url, {
+          everOpened: this.everOpened, token: this.token, envUrl: process.env.AITHER_RELAY_URL,
+        });
+        if (next) { this.url = next; continue; }
+        return { ok: false, error: `relay unreachable at ${this.httpBase()}: ${e?.message || e}` };
+      }
+      let data: any = null;
+      try { data = await r.json(); } catch { /* an empty or non-JSON body */ }
+      if (!r.ok) return { ok: false, status: r.status, error: relayErrorText(r.status, data) };
+      return { ok: true, data: data as T };
+    }
+  }
+
+  /** The channels this session can see (`scope` as listChannels). */
+  async channels(scope = 'platform'): Promise<RelayResult<RelayChannel[]>> {
+    const r = await this.rest<any>('GET',
+      `/v1/channels?scope=${encodeURIComponent(scope)}&nick=${encodeURIComponent(this.nick)}`);
+    return r.ok ? { ok: true, data: toChannels(r.data) } : r;
+  }
+
+  /** The newest `limit` messages in `channel`, oldest first. Reading is open to anyone. */
+  async read(channel: string, limit = 20): Promise<RelayResult<RelayMessage[]>> {
+    const r = await this.rest<any>('GET', `/v1/channels/${channelSegment(channel)}/messages?limit=${limit}`);
+    if (!r.ok) return r;
+    const msgs = (Array.isArray(r.data) ? r.data : (r.data?.messages || [])) as RelayMessage[];
+    return { ok: true, data: msgs.slice().sort(byTimestamp) };
+  }
+
+  /** Post one line to `channel` as this session. The relay checks the nick against the
+   *  token and applies the same humanity and moderation gates as the socket. */
+  async post(channel: string, content: string): Promise<RelayResult<RelayMessage | null>> {
+    const name = `#${channel.trim().replace(/^#/, '')}`;
+    const r = await this.rest<any>('POST', `/v1/channels/${channelSegment(channel)}/messages`,
+      { channel: name, nick: this.nick, content, agent: false });
+    if (!r.ok) return r;
+    if (r.data?.success === false) {
+      return { ok: false, error: r.data?.message || r.data?.reason || (r.data?.held ? 'held for review' : 'not sent') };
+    }
+    return { ok: true, data: typeof r.data?.message === 'object' ? r.data.message as RelayMessage : null };
+  }
+
+  /** This session's DM conversations. The relay derives who "this session" is from the token. */
+  async dmPartners(): Promise<RelayResult<RelayDmPartner[]>> {
+    const r = await this.rest<any>('GET', '/v1/dms/partners');
+    return r.ok ? { ok: true, data: (r.data?.partners || []) as RelayDmPartner[] } : r;
+  }
+
+  /** The DM conversation with `nick`, oldest first. */
+  async dmHistory(nick: string, limit = 30): Promise<RelayResult<RelayDm[]>> {
+    const r = await this.rest<any>('GET', `/v1/dms/${encodeURIComponent(nick.replace(/^@/, ''))}?limit=${limit}`);
+    if (!r.ok) return r;
+    return { ok: true, data: ((r.data?.messages || []) as RelayDm[]).slice().sort(byTimestamp) };
+  }
+
+  /** DM `toNick`. `delivered` = it reached their live socket now; it is stored either way.
+   *  A message the relay holds for review is a refusal, said plainly. */
+  async sendDm(toNick: string, content: string): Promise<RelayResult<{ delivered: boolean; message: RelayDm | null }>> {
+    const r = await this.rest<any>('POST', '/v1/dms', { to_nick: toNick.replace(/^@/, ''), content });
+    if (!r.ok) return r;
+    if (r.data?.success === false) {
+      return { ok: false, error: r.data?.message || r.data?.reason || (r.data?.held ? 'held for review' : 'not sent') };
+    }
+    return { ok: true, data: { delivered: !!r.data?.delivered, message: (r.data?.message as RelayDm) || null } };
   }
 
   /** Fetch messages OLDER than `beforeTimestamp` (ISO) for scrollback. Returns

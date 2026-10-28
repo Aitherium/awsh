@@ -23,6 +23,7 @@ import type { GenesisClient } from './client.js';
 import type { ShellConfig } from './config.js';
 import { setActiveConfig, deepseekProvider, kimiProvider, roleProvider, getActiveConfig } from './config.js';
 import { RelayClient, resolveRelayUrl, type RelayMessage, type RelayUser } from './relay.js';
+import { isRelayOneShot } from './relay-command.js';
 import { createStreamRenderer, SteeringBar, type SessionProfile } from './renderer.js';
 import { stripFenceDelimiters } from './tui/chat-formatter.js';
 import { getCommand, getCommandNames } from './commands.js';
@@ -235,6 +236,13 @@ export async function startRepl(client: GenesisClient, config: ShellConfig): Pro
   async function startRelayReadline(arg: string): Promise<void> {
     const a = arg.trim();
     const sub = a.split(/\s+/)[0]?.toLowerCase() || '';
+    // read / send / dm run once and come back (commands.ts `relay`), in or out of live chat.
+    const once = isRelayOneShot(a, !!relayRl) ? getCommand('relay') : undefined;
+    if (once) {
+      try { await once.handler(client, a, config); }
+      catch (err: any) { console.log(chalk.red(`  Error: ${err?.message || err}`)); }
+      return;
+    }
     if (relayRl) {
       if (sub === 'leave' || sub === 'exit' || sub === 'quit') { leaveRelayReadline(); return; }
       if (sub === 'join' && a.split(/\s+/)[1]) { relayRl.join(a.split(/\s+/)[1]); return; }
@@ -244,7 +252,7 @@ export async function startRepl(client: GenesisClient, config: ShellConfig): Pro
       console.log(chalk.dim('  In relay: type to chat · /relay join #x · /relay channels · /leave')); return;
     }
     const nick = config.authUser?.username || config.authUser?.display_name || `dev_${Math.floor(Math.random() * 9000 + 1000)}`;
-    const client = new RelayClient({
+    const live = new RelayClient({
       url: resolveRelayUrl(), token: config.authToken || undefined, nick,
       handlers: {
         onStatus: (s) => { if (s !== 'open') relayPrint(chalk.dim(`  📡 relay: ${s}`)); },
@@ -257,9 +265,9 @@ export async function startRepl(client: GenesisClient, config: ShellConfig): Pro
       },
     });
     const channel = a.startsWith('#') ? a : '#general';
-    relayRl = client;
+    relayRl = live;
     console.log(chalk.green(`  📡 Joining ${channel} as ${nick}…  (type to chat · /relay join #x · /leave)`));
-    client.connect(channel);
+    live.connect(channel);
   }
   function leaveRelayReadline(): void {
     if (!relayRl) return;

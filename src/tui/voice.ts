@@ -1,12 +1,19 @@
 /**
  * AitherVoice TTS — opt-in "speak Aither's answers aloud".
  *
- * Talks to the AitherVoice service (PerceptionMedia :8084, compound prefix
- * /voice) over HTTPS with the internal CA (rejectUnauthorized:false), falling
- * back to HTTP. Synthesises to a temp file and plays it via an OS player
- * child-process — no audio npm deps. Off by default; the REPL flips `enabled`
- * via a /voice command and calls `say()` with each finished answer, so playback
- * is serialised (one utterance at a time) and never blocks the UI.
+ * Aither speaks in HER voice (AITHER_VOICE, `custom:aither`) unless the user names
+ * another: Genesis says it for any signed-in caller (POST /voice-builds/platform-voice/
+ * say), the door OS voice chat, AitherConnect and the Android app already use. Until
+ * 2026-10-28 the shell defaulted to the stock "nova" -- the owner's rule is that Aither
+ * never speaks in a stock voice, and a failure is reported, never re-voiced.
+ *
+ * A voice the user picks by name still works: `custom:<name>` (their workspace's voice,
+ * through Genesis) or a stock name (the AitherVoice service, PerceptionMedia :8084,
+ * compound prefix /voice, over HTTPS with the internal CA, falling back to HTTP).
+ * Synthesises to a temp file and plays it via an OS player child-process — no audio npm
+ * deps. Off by default; the REPL flips `enabled` via a /voice command and calls `say()`
+ * with each finished answer, so playback is serialised (one utterance at a time) and
+ * never blocks the UI.
  *
  * POST /voice/synthesize  { text, voice, speed, format, return_base64:true }
  *   → { success, audio_base64, format, duration_seconds, error }
@@ -17,14 +24,14 @@ import { request as httpRequest } from 'node:http';
 import { writeFileSync, mkdirSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { amplitudeEnvelope, levelAt, type Envelope } from './audio-envelope.js';
+import { amplitudeEnvelope, levelAt, parseWav, type Envelope } from './audio-envelope.js';
 import { assertCredentialTarget } from '../credential-guard.js';
 
 export interface VoiceOptions {
   baseUrl?: string;                   // service root incl. /voice prefix; local or gateway
   fallbackUrl?: string;               // fallback endpoint for local voice (adk bridge :8085)
   headers?: Record<string, string>;   // auth headers (Bearer + X-API-Key) when routed via the gateway
-  voice?: string;                     // nova|alloy|echo|fable|onyx|shimmer (default nova)
+  voice?: string;                     // default AITHER_VOICE; custom:<name>; or a stock name picked by the user
   format?: string;                    // wav|mp3|opus|… (default wav — most reliable for local playback)
   speed?: number;                     // 0.25..4.0
   /** Genesis client for workspace custom voices (`custom:<name>`). Unset = stock voices only. */
@@ -46,15 +53,105 @@ export const CUSTOM_VOICE_PREFIX = 'custom:';
 export const isCustomVoice = (v: string | undefined | null): boolean =>
   typeof v === 'string' && v.startsWith(CUSTOM_VOICE_PREFIX) && v.length > CUSTOM_VOICE_PREFIX.length;
 export const customVoiceName = (v: string): string => v.slice(CUSTOM_VOICE_PREFIX.length);
-/** The stock AitherVoice names (what `/voice list` prints before any custom ones). */
+/** The stock AitherVoice names: spoken only when the user picks one by name. */
 export const STOCK_VOICES = ['nova', 'alloy', 'echo', 'fable', 'onyx', 'shimmer'] as const;
 
-/** The `/voice list` body (pure -- unit-tested): stock names, then the workspace's custom ids. */
+/**
+ * Aither's own voice -- the default. Genesis speaks it for ANY signed-in caller in any
+ * workspace (the voice is family_tutor_voice.PLATFORM_VOICE from its home workspace).
+ */
+export const AITHER_VOICE = 'custom:aither';
+export const PLATFORM_SAY_PATH = '/voice-builds/platform-voice/say';
+/** Genesis caps one platform line (family_tutor_voice.MAX_CHARS); longer text goes in pieces. */
+export const PLATFORM_SAY_MAX_CHARS = 240;
+/** Pieces per utterance: 8 x 240 covers the 1600 chars the TUI sends, inside Genesis's
+ *  40-a-minute per-caller cap. */
+export const PLATFORM_SAY_MAX_PIECES = 8;
+/** What `/voice on` asks Aither to say to prove her voice answers (cached by Genesis). */
+export const AITHER_PROBE_LINE = 'Voice on.';
+
+/** `/voice aither` and `/voice default` mean Aither's own voice (pure). */
+export function resolveVoiceName(name: string): string {
+  const n = name.trim();
+  return /^(aither|default)$/i.test(n) ? AITHER_VOICE : n;
+}
+
+/** The `/voice list` body (pure -- unit-tested): Aither first, the workspace's custom ids,
+ *  then the stock names a user may pick. */
 export function voiceListLines(custom: string[]): string[] {
-  const lines = [`  stock: ${STOCK_VOICES.join(', ')}`];
-  if (custom.length) lines.push(`  custom: ${custom.join(', ')}`);
+  const lines = [`  aither: ${AITHER_VOICE} (default: Aither's own voice)`];
+  const own = custom.filter((v) => v !== AITHER_VOICE);
+  if (own.length) lines.push(`  custom: ${own.join(', ')}`);
   else lines.push('  (no custom voices in this workspace)');
+  lines.push(`  stock: ${STOCK_VOICES.join(', ')} (only when picked by name)`);
   return lines;
+}
+
+/**
+ * The voice a saved ~/.aither/config.json `voice` block chose, or null for Aither's (pure).
+ * Until 2026-10-28 every /voice speed change also wrote the then-default "nova", so a
+ * bare "nova" without `picked` is that echo, not a choice -- it must not keep a stock
+ * voice in place of Aither's.
+ */
+export function savedVoiceChoice(saved: any): string | null {
+  if (!saved || typeof saved.voice !== 'string' || !saved.voice.trim()) return null;
+  if (saved.picked === true) return saved.voice;
+  return saved.voice === 'nova' ? null : saved.voice;
+}
+
+/** Split text into <= max-char pieces at sentence, then word, boundaries (pure). The same
+ *  rule AitherConnect's chunkForSay uses for this door. */
+export function chunkForSay(text: string, max = PLATFORM_SAY_MAX_CHARS): string[] {
+  const out: string[] = [];
+  let rest = text.replace(/\s+/g, ' ').trim();
+  while (rest.length > max) {
+    const window = rest.slice(0, max);
+    let cut = Math.max(window.lastIndexOf('. '), window.lastIndexOf('! '), window.lastIndexOf('? '));
+    if (cut > 0) cut += 1;
+    else cut = window.lastIndexOf(' ');
+    if (cut <= 0) cut = max;
+    out.push(rest.slice(0, cut).trim());
+    rest = rest.slice(cut).trim();
+  }
+  if (rest) out.push(rest);
+  return out;
+}
+
+/**
+ * One WAV from several (pure): the pieces of one answer, played as one file so the
+ * player, the lip-sync envelope and the reveal pacing see one utterance. Null when a
+ * piece is not a WAV we can read or the pieces disagree on format.
+ */
+export function joinWav(parts: Buffer[]): Buffer | null {
+  const infos = parts.map((b) => parseWav(b));
+  const first = infos[0];
+  if (!first || infos.some((w) => !w || w.format !== first.format || w.channels !== first.channels
+      || w.sampleRate !== first.sampleRate || w.bitsPerSample !== first.bitsPerSample)) return null;
+  const data = Buffer.concat(infos.map((w) => w!.data));
+  const blockAlign = first.channels * (first.bitsPerSample / 8);
+  const head = Buffer.alloc(44);
+  head.write('RIFF', 0, 'ascii');
+  head.writeUInt32LE(36 + data.length, 4);
+  head.write('WAVE', 8, 'ascii');
+  head.write('fmt ', 12, 'ascii');
+  head.writeUInt32LE(16, 16);
+  head.writeUInt16LE(first.format, 20);
+  head.writeUInt16LE(first.channels, 22);
+  head.writeUInt32LE(first.sampleRate, 24);
+  head.writeUInt32LE(first.sampleRate * blockAlign, 28);
+  head.writeUInt16LE(blockAlign, 32);
+  head.writeUInt16LE(first.bitsPerSample, 34);
+  head.write('data', 36, 'ascii');
+  head.writeUInt32LE(data.length, 40);
+  return Buffer.concat([head, data]);
+}
+
+/** Seconds of audio in a WAV, or undefined when it is not one we can read (pure). */
+export function wavSeconds(buf: Buffer): number | undefined {
+  const w = parseWav(buf);
+  if (!w) return undefined;
+  const perSecond = w.sampleRate * w.channels * (w.bitsPerSample / 8);
+  return perSecond > 0 ? w.data.length / perSecond : undefined;
 }
 
 /**
@@ -101,7 +198,7 @@ export async function listCustomVoices(client: GenesisVoiceClient | undefined): 
   } catch { return []; }
 }
 
-const DEFAULTS = { baseUrl: 'https://127.0.0.1:8084/voice', voice: 'nova', format: 'wav', speed: 1.0 };
+const DEFAULTS = { baseUrl: 'https://127.0.0.1:8084/voice', format: 'wav', speed: 1.0 };
 
 // User-tunable playback rate (× normal). The service accepts 0.25–4.0; the
 // controller default is brisker than 1.0 because the fleet voices read slow.
@@ -121,11 +218,12 @@ export const clampSpeed = (n: number): number => Math.max(SPEED_MIN, Math.min(SP
  */
 export const REVEAL_BUDGET_MS = 900;
 
-/** Build the /voice/synthesize request body (pure — unit-tested). */
+/** Build the STOCK service's /voice/synthesize body (pure — unit-tested). Only a stock voice
+ *  the user picked reaches it: synthesize() sends Aither's and custom voices to Genesis. */
 export function buildSynthesisBody(text: string, opts: VoiceOptions = {}): Record<string, unknown> {
   return {
     text,
-    voice: opts.voice ?? DEFAULTS.voice,
+    voice: opts.voice ?? STOCK_VOICES[0],
     speed: opts.speed ?? DEFAULTS.speed,
     format: opts.format ?? DEFAULTS.format,
     return_base64: true,
@@ -196,11 +294,13 @@ async function httpJson(url: string, body: unknown, headers: Record<string, stri
 
 /** Synthesise `text` → a temp audio file path (try primary, fallback to secondary, HTTPS first, HTTP fallback). */
 export async function synthesize(text: string, opts: VoiceOptions = {}): Promise<{ ok: boolean; path?: string; format?: string; durationS?: number; error?: string }> {
-  if (isCustomVoice(opts.voice)) return synthesizeCustom(text, opts.voice as string, opts);
+  const voice = opts.voice || AITHER_VOICE;
+  if (voice === AITHER_VOICE) return synthesizeAither(text, opts);
+  if (isCustomVoice(voice)) return synthesizeCustom(text, voice, opts);
   const base = (opts.baseUrl ?? DEFAULTS.baseUrl).replace(/\/+$/, '');
   const fallback = opts.fallbackUrl?.replace(/\/+$/, '') || '';
   const headers = opts.headers ?? {};
-  const body = buildSynthesisBody(text, opts);
+  const body = buildSynthesisBody(text, { ...opts, voice });
   let json: any;
   try {
     json = await httpJson(`${base}/synthesize`, body, headers);
@@ -241,11 +341,50 @@ export async function synthesize(text: string, opts: VoiceOptions = {}): Promise
 function writeSynthesis(json: any): { ok: boolean; path?: string; format?: string; durationS?: number; error?: string } {
   const parsed = parseSynthesisResult(json);
   if (!parsed.ok || !parsed.audio) return { ok: false, error: parsed.error };
+  return writeAudio(parsed.audio, parsed.format || 'wav', Number(json.duration_seconds) || undefined);
+}
+
+/** Write audio bytes to a temp file the OS player can open. */
+function writeAudio(audio: Buffer, format: string, durationS?: number): { ok: boolean; path?: string; format?: string; durationS?: number } {
   const dir = join(tmpdir(), 'aither-voice');
   try { mkdirSync(dir, { recursive: true }); } catch { /* */ }
-  const file = join(dir, `speak_${process.pid}_${(json.duration_seconds || 0)}.${parsed.format || 'wav'}`);
-  writeFileSync(file, parsed.audio);
-  return { ok: true, path: file, format: parsed.format, durationS: Number(json.duration_seconds) || undefined };
+  const file = join(dir, `speak_${process.pid}_${durationS || 0}.${format}`);
+  writeFileSync(file, audio);
+  return { ok: true, path: file, format, durationS };
+}
+
+/** One line (<= PLATFORM_SAY_MAX_CHARS) in Aither's voice, or why not. Never throws. */
+async function sayAitherPiece(genesis: GenesisVoiceClient, text: string): Promise<{ ok: true; audio: Buffer } | { ok: false; error: string }> {
+  let json: any;
+  try {
+    json = await genesis.requestDetailed('POST', PLATFORM_SAY_PATH, { text, format: 'wav' }, CUSTOM_SAY_TIMEOUT_MS);
+  } catch (e: any) {
+    return { ok: false, error: `Aither's voice: ${e?.message || e}` };
+  }
+  if (!json || json.error || typeof json.audio_base64 !== 'string' || !json.audio_base64) {
+    return { ok: false, error: `Aither's voice: ${json?.error || 'no audio'}` };
+  }
+  return { ok: true, audio: Buffer.from(json.audio_base64, 'base64') };
+}
+
+/**
+ * Speak with Aither's own voice through Genesis (POST /voice-builds/platform-voice/say
+ * {text <= 240, format} -> {audio_base64, format, voice, cached}), a piece at a time,
+ * joined into one WAV. Never falls back to another voice: a refusal is reported.
+ */
+async function synthesizeAither(text: string, opts: VoiceOptions): Promise<{ ok: boolean; path?: string; format?: string; durationS?: number; error?: string }> {
+  if (!opts.genesis) return { ok: false, error: "Aither's voice needs a Genesis connection (sign in: awsh login)" };
+  const pieces = chunkForSay(text).slice(0, PLATFORM_SAY_MAX_PIECES);
+  if (!pieces.length) return { ok: false, error: 'nothing to say' };
+  const wavs: Buffer[] = [];
+  for (const piece of pieces) {
+    const got = await sayAitherPiece(opts.genesis, piece);
+    if (!got.ok) return { ok: false, error: got.error };
+    wavs.push(got.audio);
+  }
+  const audio = wavs.length === 1 ? wavs[0] : joinWav(wavs);
+  if (!audio) return { ok: false, error: "Aither's voice: the pieces came back in different formats" };
+  return writeAudio(audio, 'wav', wavSeconds(audio));
 }
 
 /**
@@ -428,6 +567,7 @@ export class VoiceController {
   /** The user's chosen rate — affect nudges AROUND this, never replaces it. */
   private baseSpeed = SPEED_DEFAULT;
   private lastArousal = 0;
+  private problem = '';
 
   constructor(opts: VoiceOptions = {}) {
     this.opts = opts;
@@ -441,8 +581,10 @@ export class VoiceController {
   level(): number { return getLevel(); }
 
   isEnabled(): boolean { return this.enabled; }
-  setVoice(voice: string): void { this.opts.voice = voice; }
-  getVoice(): string { return this.opts.voice ?? DEFAULTS.voice; }
+  setVoice(voice: string): void { this.opts.voice = resolveVoiceName(voice); }
+  getVoice(): string { return this.opts.voice || AITHER_VOICE; }
+  /** Why the last available() said no ('' when it said yes). */
+  lastProblem(): string { return this.problem; }
   enable(): void { this.enabled = true; }
   disable(): void { this.enabled = false; }
   isSpeaking(): boolean { return this.speaking; }
@@ -465,10 +607,22 @@ export class VoiceController {
 
   /** Health probe against the configured base, fallback, and HTTP variants. */
   async available(): Promise<boolean> {
+    const voice = this.getVoice();
+    this.problem = '';
+    // Aither's voice: ask her to say one short line (Genesis caches it) -- the only proof
+    // that the door answers for THIS caller.
+    if (voice === AITHER_VOICE) {
+      if (!this.opts.genesis) { this.problem = "Aither's voice needs a Genesis connection (sign in: awsh login)"; return false; }
+      const got = await sayAitherPiece(this.opts.genesis, AITHER_PROBE_LINE);
+      if (!got.ok) this.problem = got.error;
+      return got.ok;
+    }
     // A custom voice is spoken by Genesis, not AitherVoice: it is available when the
     // caller's workspace lists it.
-    if (isCustomVoice(this.opts.voice)) {
-      return (await listCustomVoices(this.opts.genesis)).includes(this.opts.voice as string);
+    if (isCustomVoice(voice)) {
+      const ok = (await listCustomVoices(this.opts.genesis)).includes(voice);
+      if (!ok) this.problem = `${voice} is not in this workspace`;
+      return ok;
     }
     const base = (this.opts.baseUrl ?? DEFAULTS.baseUrl).replace(/\/+$/, '');
     const fallback = (this.opts.fallbackUrl ?? '').replace(/\/+$/, '') || '';
@@ -501,6 +655,7 @@ export class VoiceController {
         if (ok) return true;
       } catch { /* try next url */ }
     }
+    this.problem = `AitherVoice not reachable at ${base}`;
     return false;
   }
 

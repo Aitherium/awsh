@@ -38,7 +38,9 @@ describe('slow TTS must never hold the answer hostage', () => {
     // 8x the budget — comfortably the "7.2s cold edge-tts" case.
     const { server, url } = await slowVoiceServer(REVEAL_BUDGET_MS * 8);
     try {
-      const voice = new VoiceController({ baseUrl: url });
+      // The stand-in is the stock AitherVoice service, so pick a stock voice by name
+      // (unset is Aither's own voice, spoken by Genesis -- the case below).
+      const voice = new VoiceController({ baseUrl: url, voice: 'nova' });
       voice.enable();
 
       const answer = 'Hello! How can I help you?';
@@ -54,6 +56,21 @@ describe('slow TTS must never hold the answer hostage', () => {
         `text must appear at ~the budget, not at synthesis time (took ${elapsed}ms)`,
       );
     } finally { server.close(); }
+  });
+
+  test("Aither's own voice (the default) answering slowly also reveals at the budget", async () => {
+    const genesis = {
+      requestDetailed: () => new Promise<any>((r) => setTimeout(() => r({ error: 'too slow', status: 503 }), REVEAL_BUDGET_MS * 4)),
+      getDetailed: async () => ({ voices: [] }),
+    };
+    const voice = new VoiceController({ genesis });
+    voice.enable();
+    let revealed = '';
+    const started = Date.now();
+    const res = await voice.speakSynced('Hello there.', (d) => { revealed += d; });
+    assert.equal(revealed, 'Hello there.');
+    assert.equal(res.deferred, true);
+    assert.ok(Date.now() - started < REVEAL_BUDGET_MS * 3);
   });
 
   test('disabled voice reveals immediately and never defers', async () => {

@@ -93,6 +93,12 @@
       "aliases": []
     },
     {
+      "name": "dm",
+      "category": "core",
+      "description": "Relay direct messages: /dm lists them, /dm <nick> reads one, /dm <nick> <text> sends",
+      "aliases": []
+    },
+    {
       "name": "docker",
       "category": "ops",
       "description": "Manage Docker containers (up/down/status/build/restart/logs/ps/recover)",
@@ -248,6 +254,12 @@
       "name": "rc",
       "category": "core",
       "description": "",
+      "aliases": []
+    },
+    {
+      "name": "relay",
+      "category": "core",
+      "description": "Relay chat: read or send in a channel; /relay #channel in a shell joins live",
       "aliases": []
     },
     {

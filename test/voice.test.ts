@@ -259,11 +259,13 @@ describe('custom voices', () => {
     assert.deepEqual(calls, [{ method: 'GET', path: '/voice-builds/voices' }]);
   });
 
-  test('/voice list renders stock names and the empty-workspace line', () => {
+  test("/voice list puts Aither's voice first, then custom, then stock (picked by name only)", () => {
     const empty = voiceListLines([]);
-    assert.match(empty[0], /nova, alloy, echo, fable, onyx, shimmer/);
+    assert.match(empty[0], /custom:aither \(default/);
     assert.equal(empty[1], '  (no custom voices in this workspace)');
-    assert.deepEqual(voiceListLines(['custom:dad']).slice(1), ['  custom: custom:dad']);
+    assert.match(empty[2], /nova, alloy, echo, fable, onyx, shimmer \(only when picked by name\)/);
+    // The owner's workspace lists custom:aither itself; it is not repeated as a custom voice.
+    assert.deepEqual(voiceListLines(['custom:dad', 'custom:aither']).slice(1, 2), ['  custom: custom:dad']);
   });
 
   test('custom say body fits the Genesis SayRequest bounds (text <= 1000, speed 0.5..2.0)', async () => {

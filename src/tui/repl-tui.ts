@@ -44,7 +44,7 @@ import { createTuiScreen, type PickerItem, type TuiSurface } from './screen.js';
 import { createTuiRenderer } from './controller.js';
 import { haltMessage } from './queue-halt.js';
 import { AffectPoller } from './affect.js';
-import { VoiceController, isCustomVoice, listCustomVoices, voiceListLines } from './voice.js';
+import { AITHER_VOICE, VoiceController, isCustomVoice, listCustomVoices, savedVoiceChoice, voiceListLines } from './voice.js';
 import { resolveServiceEndpoint } from './service-endpoint.js';
 import { buildAffectPanel } from './aithersense-panel.js';
 import { buildFlameGraph } from './flame-graph-overlay.js';
@@ -72,6 +72,7 @@ import { emotionFromAffect } from './avatar.js';
 import type { StreamRenderer } from '../renderer.js';
 import { setTuiActive } from '../crash-reporter.js';
 import { RelayClient, resolveRelayUrl, type RelayMessage, type RelayUser } from '../relay.js';
+import { isRelayOneShot } from '../relay-command.js';
 import { BackgroundJobsListener } from '../background-jobs-listener.js';
 import { resolveServerJobId, formatServerJobLine, type ServerExpedition, type BlockingGate } from '../jobs.js';
 
@@ -221,10 +222,14 @@ export async function startTuiRepl(client: GenesisClient, config: ShellConfig): 
     try { if (existsSync(aitherConfigPath)) return JSON.parse(readFileSync(aitherConfigPath, 'utf-8')); } catch { /* */ }
     return {};
   }
+  // A voice is saved only when the user PICKED one; otherwise Aither's own voice is used.
+  let voicePicked = false;
   function saveVoiceSettings(): void {
     try {
       const cfg = readAitherConfig();
-      cfg.voice = { ...(cfg.voice || {}), speed: voice.getSpeed(), voice: voice.getVoice() };
+      const v: Record<string, any> = { ...(cfg.voice || {}), speed: voice.getSpeed() };
+      if (voicePicked) { v.voice = voice.getVoice(); v.picked = true; } else { delete v.voice; delete v.picked; }
+      cfg.voice = v;
       mkdirSync(join(homedir(), '.aither'), { recursive: true });
       writeFileSync(aitherConfigPath, JSON.stringify(cfg, null, 2), 'utf-8');
     } catch { /* persistence is best-effort — never break the REPL */ }
@@ -232,7 +237,8 @@ export async function startTuiRepl(client: GenesisClient, config: ShellConfig): 
   {
     const saved = readAitherConfig().voice;
     if (saved && typeof saved.speed === 'number') voice.setSpeed(saved.speed);
-    if (saved && typeof saved.voice === 'string' && saved.voice) voice.setVoice(saved.voice);
+    const choice = savedVoiceChoice(saved);
+    if (choice) { voice.setVoice(choice); voicePicked = voice.getVoice() !== AITHER_VOICE; }
   }
   affectPoller.onUpdate((a) => {
     voice.setAffect({ valence: a.valence, arousal: a.arousal });
@@ -441,9 +447,10 @@ export async function startTuiRepl(client: GenesisClient, config: ShellConfig): 
   }
 
   /**
-   * /voice [on|off|status|list|speed <0.25–4>|faster|slower|<voice-name>|custom:<name>]
-   * Toggle speaking answers aloud via AitherVoice + tune how fast she talks.
-   * Speed and voice persist across sessions (~/.aither/config.json).
+   * /voice [on|off|status|list|speed <0.25–4>|faster|slower|aither|<voice-name>|custom:<name>]
+   * Toggle speaking answers aloud -- in Aither's own voice unless the user picks another --
+   * and tune how fast she talks (speed applies to a picked voice; Aither's keeps her pace).
+   * Speed and a picked voice persist across sessions (~/.aither/config.json).
    */
   async function toggleVoice(arg: string): Promise<void> {
     const parts = arg.trim().split(/\s+/).filter(Boolean);
@@ -470,15 +477,22 @@ export async function startTuiRepl(client: GenesisClient, config: ShellConfig): 
       surface.outputLine(chalk.cyan(`  ♪ speed ${voice.getSpeed().toFixed(2)}×`) + chalk.dim(' — saved'));
       return;
     }
-    if (a && a !== 'on') { voice.setVoice(parts[0]); saveVoiceSettings(); }   // /voice <name> selects a voice + enables
-    const custom = isCustomVoice(voice.getVoice());
-    surface.setStatus(custom ? 'checking custom voice…' : 'checking AitherVoice…');
+    if (a && a !== 'on') {   // /voice <name> selects a voice + enables; /voice aither = the default
+      voice.setVoice(parts[0]);
+      voicePicked = voice.getVoice() !== AITHER_VOICE;
+      saveVoiceSettings();
+    }
+    const aither = voice.getVoice() === AITHER_VOICE;
+    const custom = !aither && isCustomVoice(voice.getVoice());
+    surface.setStatus(aither ? "checking Aither's voice…" : custom ? 'checking custom voice…' : 'checking AitherVoice…');
     const ok = await voice.available();
     idleStatus();
     if (!ok) {
-      surface.outputLine(chalk.yellow(custom
-        ? `  voice unavailable — ${voice.getVoice()} is not in this workspace ("/voice list" shows what is)`
-        : `  voice unavailable — AitherVoice not reachable at ${voiceEp.baseUrl}`));
+      surface.outputLine(chalk.yellow(aither
+        ? `  voice unavailable — ${voice.lastProblem()}. Aither speaks only in her own voice; "/voice list" shows others to pick.`
+        : custom
+          ? `  voice unavailable — ${voice.getVoice()} is not in this workspace ("/voice list" shows what is)`
+          : `  voice unavailable — AitherVoice not reachable at ${voiceEp.baseUrl}`));
       return;
     }
     voice.enable();
@@ -1462,6 +1476,13 @@ export async function startTuiRepl(client: GenesisClient, config: ShellConfig): 
     const a = args.trim();
     const parts = a.split(/\s+/);
     const sub = (parts[0] || '').toLowerCase();
+    // read / send / dm run once and come back (commands.ts `relay`), in or out of live chat.
+    const once = isRelayOneShot(a, !!relay) ? getCommand('relay') : undefined;
+    if (once) {
+      await surface.runDetached('relay', async () => { await once.handler(client, a, config); });
+      if (relay) relayStatus(); else idleStatus();
+      return;
+    }
     if (relay) {
       if (sub === 'leave' || sub === 'exit' || sub === 'quit') { leaveRelay(); return; }
       if (sub === 'join') {

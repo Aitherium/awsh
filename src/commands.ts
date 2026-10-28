@@ -4335,26 +4335,27 @@ const COMMANDS: Record<string, Command> = {
   },
 
   speak: {
-    description: 'Text-to-speech via Lyra',
-    usage: '/speak <text> [--voice <name>|custom:<name>]',
-    // Genesis mounts no /voice/* route. TTS is the AitherVoice service, resolved the
-    // same way the TUI's spoken answers resolve it (local perception port, or the
-    // gateway's /voice prefix with the caller's key) -- tui/service-endpoint.ts.
+    description: "Say text aloud in Aither's own voice (or a voice you name)",
+    usage: '/speak <text> [--voice custom:<name>|<stock name>]',
+    // Aither's voice (the default) and custom:<name> voices are spoken by Genesis
+    // /voice-builds; a stock name the user picks goes to the AitherVoice service,
+    // resolved the same way the TUI's spoken answers resolve it -- tui/service-endpoint.ts.
     handler: async (_client: GenesisClient, args: string, config: ShellConfig) => {
       let text = args;
       let voice: string | undefined;
       const voiceMatch = args.match(/--voice\s+(\S+)/);
       if (voiceMatch) { voice = voiceMatch[1]; text = text.replace(voiceMatch[0], ''); }
       text = text.trim();
-      if (!text) { console.log(chalk.dim('  Usage: /speak <text> [--voice <name>|custom:<name>]')); return; }
+      if (!text) { console.log(chalk.dim('  Usage: /speak <text> [--voice custom:<name>|<stock name>]')); return; }
       const { resolveServiceEndpoint } = await import('./tui/service-endpoint.js');
-      const { synthesize, play } = await import('./tui/voice.js');
+      const { synthesize, play, resolveVoiceName } = await import('./tui/voice.js');
       const ep = resolveServiceEndpoint(config, 'voice');
       const spinner = ora('Synthesizing speech...').start();
       try {
         const result = await synthesize(text, {
-          baseUrl: ep.baseUrl, fallbackUrl: ep.fallbackUrl, headers: ep.headers, voice,
-          genesis: _client,   // a custom:<name> voice is spoken by Genesis /voice-builds
+          baseUrl: ep.baseUrl, fallbackUrl: ep.fallbackUrl, headers: ep.headers,
+          voice: voice ? resolveVoiceName(voice) : undefined,   // unset = Aither's own voice
+          genesis: _client,   // Aither's and custom:<name> voices are spoken by Genesis /voice-builds
         });
         spinner.stop();
         if (!result.ok || !result.path) {
@@ -8448,6 +8449,42 @@ COMMANDS['devices'] = {
   handler: async (_client: GenesisClient, args: string) => {
     const { runDevicesCommand } = await import('./devices-command.js');
     await runDevicesCommand(parseQuotedArgs(args.trim()));
+  },
+};
+
+/** The relay verbs' dependencies: who you are is your sign-in token (relay-command.ts). */
+async function relayCommandDeps(config: ShellConfig) {
+  const { RelayClient, resolveRelayUrl } = await import('./relay.js');
+  const token = config.authToken || undefined;
+  const nick = config.authUser?.username || config.authUser?.display_name || '';
+  return {
+    relay: new RelayClient({ url: resolveRelayUrl(), token, nick, handlers: {} }),
+    signedIn: !!token,
+    out: (line: string) => console.log(line),
+  };
+}
+
+// `/relay read|send|channels` run once (one-shot `awsh relay ...`, or from a shell);
+// `/relay [#channel]` inside the TUI or REPL still joins live chat -- they route the
+// one-shot verbs here (isRelayOneShot) and keep the rest.
+COMMANDS['relay'] = {
+  description: 'Relay chat: read or send in a channel; /relay #channel in a shell joins live',
+  usage: '/relay [channels [scope] | read <channel> [n] | send <channel> <text> | dm [<nick> [text]]]',
+  handler: async (_client: GenesisClient, args: string, config: ShellConfig) => {
+    const { runRelayCommand } = await import('./relay-command.js');
+    const r = await runRelayCommand(parseQuotedArgs(args.trim()), await relayCommandDeps(config));
+    if (!r.ok) throw new Error(r.error);   // the shells print it; one-shot exits 1
+  },
+};
+
+// `/dm` — relay direct messages: list, read one conversation, send.
+COMMANDS['dm'] = {
+  description: 'Relay direct messages: /dm lists them, /dm <nick> reads one, /dm <nick> <text> sends',
+  usage: '/dm [<nick> [text]]',
+  handler: async (_client: GenesisClient, args: string, config: ShellConfig) => {
+    const { runDmCommand } = await import('./relay-command.js');
+    const r = await runDmCommand(parseQuotedArgs(args.trim()), await relayCommandDeps(config));
+    if (!r.ok) throw new Error(r.error);
   },
 };
 

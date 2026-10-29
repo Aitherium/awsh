@@ -119,8 +119,14 @@ export async function startRepl(client: GenesisClient, config: ShellConfig): Pro
   // mcpUrl/authToken without threading config through every call site.
   setActiveConfig(config);
 
-  // ── The native line-mode shell is the DEFAULT. The blessed multi-pane TUI is
-  //    OPT-IN with AITHER_TUI=1 (owner decision, 2026-08-21). ──
+  // ── The TUI is the DEFAULT. AITHER_TUI=0 is the escape hatch (owner,
+  //    2026-10-29: "WTF do you mean until it flips"). ──
+  //
+  // 2026-08-21 flipped this the other way after three TUI-created defects; that
+  // was right for a TUI that drew two mostly-empty panes and had no reason to be
+  // full-screen. The 2026-10-29 attention beam gives it one: row 0 names the ask
+  // that is waiting on the owner, and a click answers it. A default nobody sees
+  // is not a default, so the decision is reversed -- with the escapes below.
   //
   // WHY THE DEFAULT FLIPPED. The full-screen TUI takes the alt screen and with
   // it everything the terminal already does well: scrollback, selection and
@@ -143,8 +149,10 @@ export async function startRepl(client: GenesisClient, config: ShellConfig): Pro
   // The TUI is KEPT, not deleted: the per-turn trace pane is genuinely useful
   // for a long agent run, and deleting it would be an irreversible answer to a
   // reversible question.
+  // ON unless explicitly turned off. AITHER_TUI=0 / off / no restores line mode
+  // (the pre-2026-10-29 default) without a release; a pipe is never a TUI.
   const _tuiEnv = (process.env.AITHER_TUI || '').toLowerCase();
-  const _tuiOn = ['1', 'true', 'on', 'yes'].includes(_tuiEnv);
+  const _tuiOn = !['0', 'false', 'off', 'no'].includes(_tuiEnv);
   if (process.stdout.isTTY && process.stdin.isTTY && _tuiOn) {
     try {
       const { startTuiRepl } = await import('./tui/repl-tui.js');

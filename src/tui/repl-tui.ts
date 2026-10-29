@@ -31,7 +31,7 @@ import { collectArgs } from '../interactive.js';
 import { personaEmotion, personaIdle, personaLevel, personaSpeaking } from '../awdesk-bridge.js';
 import { gatherStatus, formatStatusLines, formatStatusBar, formatWelcomeHeader, type StatusInfo } from '../status-banner.js';
 import {
-  ageSeconds, fmtAge, formatBeam, formatOptions, isHot, rankBeam,
+  ageSeconds, beamEmotion, fmtAge, formatBeam, formatOptions, isHot, rankBeam,
 } from '../beam.js';
 import {
   answerDecision, fetchBeamCards, fetchDecision, liveWaitingSessionIds,
@@ -303,6 +303,8 @@ export async function startTuiRepl(client: GenesisClient, config: ShellConfig): 
   let lastFiles: FileEntry[] = [];
   const attachedPaths: string[] = [];
   let lastStatusInfo: StatusInfo | null = null;
+  /** Last beam state seen, so a new ask fires the avatar exactly once. */
+  let beamHot = false;
 
   /** Re-probe the fleet and repaint the persistent status bar (silent — never dumps
    *  into the chat pane). Called at startup and on a bar click.
@@ -321,9 +323,25 @@ export async function startTuiRepl(client: GenesisClient, config: ShellConfig): 
       const segs = info ? formatStatusBar(info) : [];
       const nowSec = Date.now() / 1000;
       const width = Math.max(40, Math.floor((process.stdout.columns || 120) * 0.62));
-      const beamSegs = formatBeam(rankBeam(cards, nowSec, live), nowSec, width, {
+      const ranked = rankBeam(cards, nowSec, live);
+      const beamSegs = formatBeam(ranked, nowSec, width, {
         red: chalk.red, amber: chalk.yellow, dim: chalk.dim, bold: chalk.bold,
       });
+      // A NEW ask changes Aither's face, on the docked pane and on the awdesk
+      // avatar, and says so on the status strip. Edge-triggered: a poll every few
+      // seconds must not re-fire it (and must not fight the affect poller).
+      const hotAsk = beamEmotion(ranked) !== null;
+      if (hotAsk !== beamHot) {
+        beamHot = hotAsk;
+        if (hotAsk) {
+          updateAvatarEmotion('curious');
+          personaEmotion('curious');
+          surface.setStatus(`⚡ ${ranked.fresh.length} asking — /decide`);
+        } else {
+          updateAvatarEmotion('neutral');
+          personaEmotion('neutral');
+        }
+      }
       // After the brand so the wordmark keeps its place; before the fleet facts,
       // which the eye may skim but which never needed an answer.
       surface.setStatusBar(segs.length ? [segs[0], ...beamSegs, ...segs.slice(1)] : beamSegs);

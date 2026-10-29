@@ -169,6 +169,19 @@ export function formatBeam(beam: Beam, nowSec: number, width: number, paint: Bea
   return shown;
 }
 
+/**
+ * The face Aither makes when something needs the owner: 'curious' — head up,
+ * looking at you — while a HOT ask is fresh, null otherwise.
+ *
+ * The avatar is Aither's, not the owner's, so this is her noticing, not an
+ * alarm. It is edge-triggered by the caller: a poll every few seconds must not
+ * re-fire it, and must not fight AitherSense, which owns her mood the rest of
+ * the time.
+ */
+export function beamEmotion(beam: Beam): 'curious' | null {
+  return beam.fresh.some((c) => isHot(c)) ? 'curious' : null;
+}
+
 /** The card's answer options as one line, for the viewer opened from the bar. */
 export function formatOptions(card: BeamCard): string {
   const opts = card.options ?? [];

@@ -8,7 +8,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
-  BEAM_MAX, FRESH_SECONDS, formatBeam, formatOptions, fmtAge, isAsk, isHot,
+  BEAM_MAX, FRESH_SECONDS, beamEmotion, formatBeam, formatOptions, fmtAge, isAsk, isHot,
   rankBeam, stillWaiting, type BeamCard,
 } from '../src/beam.ts';
 
@@ -112,4 +112,15 @@ test('formatOptions spells the choices the viewer must offer', () => {
   assert.equal(formatOptions(card({ options: [{ key: 'post', label: 'Post' }, { key: 'skip' }] })),
     'post (Post) / skip');
   assert.match(formatOptions(card({ options: [] })), /no options/);
+});
+
+test('Aither looks up when an ask is hot, and only then', () => {
+  // Her face is a notice, not an alarm: a hot ask makes her curious, everything
+  // else leaves her mood to AitherSense.
+  assert.equal(beamEmotion(rankBeam([card({ urgency: 'high' })], NOW)), 'curious');
+  assert.equal(beamEmotion(rankBeam([card({ kind: 'credential', options: [] })], NOW)), 'curious');
+  assert.equal(beamEmotion(rankBeam([card({ urgency: 'normal' })], NOW)), null);
+  // An ask older than a day is counted, not headlined — so she stops looking up.
+  assert.equal(beamEmotion(rankBeam([card({ urgency: 'high', createdAt: NOW - FRESH_SECONDS - 5 })], NOW)), null);
+  assert.equal(beamEmotion(rankBeam([], NOW)), null);
 });

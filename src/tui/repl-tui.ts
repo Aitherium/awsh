@@ -31,6 +31,12 @@ import { collectArgs } from '../interactive.js';
 import { personaEmotion, personaIdle, personaLevel, personaSpeaking } from '../awdesk-bridge.js';
 import { gatherStatus, formatStatusLines, formatStatusBar, formatWelcomeHeader, type StatusInfo } from '../status-banner.js';
 import {
+  ageSeconds, fmtAge, formatBeam, formatOptions, isHot, rankBeam,
+} from '../beam.js';
+import {
+  answerDecision, fetchBeamCards, fetchDecision, liveWaitingSessionIds,
+} from '../decisions-client.js';
+import {
   setJobNotifier, listJobs, getJob, cancelJob, runningCount,
   launchChatJob, launchForgeJob, launchSwarmJob, launchCommandJob,
   formatJobLine, formatJobOutput, type Job,
@@ -299,12 +305,76 @@ export async function startTuiRepl(client: GenesisClient, config: ShellConfig): 
   let lastStatusInfo: StatusInfo | null = null;
 
   /** Re-probe the fleet and repaint the persistent status bar (silent — never dumps
-   *  into the chat pane). Called at startup and on a bar click. */
+   *  into the chat pane). Called at startup and on a bar click.
+   *
+   *  The ATTENTION BEAM rides the same row, right after the brand: which ask is
+   *  waiting on the owner, by id and title, RED while it is hot. The fleet picture
+   *  is not what gets skipped — a card nobody could find is (2026-10-28: the one
+   *  raised that hour was #29 of 132, under eight cards from dead sessions). */
   function refreshStatusBar(): void {
-    void gatherStatus(client, config).then((info) => {
-      lastStatusInfo = info;
-      surface.setStatusBar(formatStatusBar(info));
+    void Promise.all([
+      gatherStatus(client, config).catch(() => null),
+      fetchBeamCards().catch(() => [] as Awaited<ReturnType<typeof fetchBeamCards>>),
+      liveWaitingSessionIds().catch(() => null),
+    ]).then(([info, cards, live]) => {
+      if (info) lastStatusInfo = info;
+      const segs = info ? formatStatusBar(info) : [];
+      const nowSec = Date.now() / 1000;
+      const width = Math.max(40, Math.floor((process.stdout.columns || 120) * 0.62));
+      const beamSegs = formatBeam(rankBeam(cards, nowSec, live), nowSec, width, {
+        red: chalk.red, amber: chalk.yellow, dim: chalk.dim, bold: chalk.bold,
+      });
+      // After the brand so the wordmark keeps its place; before the fleet facts,
+      // which the eye may skim but which never needed an answer.
+      surface.setStatusBar(segs.length ? [segs[0], ...beamSegs, ...segs.slice(1)] : beamSegs);
     }).catch(() => { /* status bar is best-effort */ });
+  }
+
+  /** `/decide` — list, show or answer a decision card without leaving the TUI.
+   *  The bar's ask segments open `… <id>`, so a click lands on the card itself. */
+  async function handleDecide(args: string): Promise<void> {
+    const [id, choice] = args.split(/\s+/).filter(Boolean);
+    try {
+      if (!id) {
+        const cards = await fetchBeamCards();
+        const beam = rankBeam(cards, Date.now() / 1000, await liveWaitingSessionIds());
+        if (!beam.open) { surface.outputLine(chalk.dim('  no open decisions')); return; }
+        surface.outputLine(chalk.bold(`  ${beam.open} waiting`));
+        for (const c of beam.fresh) {
+          const paint = isHot(c) ? chalk.red : chalk.yellow;
+          surface.outputLine('  ' + paint(`${c.id} ${fmtAge(ageSeconds(c, Date.now() / 1000))} ${c.title}`));
+        }
+        if (beam.open > beam.fresh.length) surface.outputLine(chalk.dim(`  +${beam.open - beam.fresh.length} older`));
+        surface.outputLine(chalk.dim('  /decide <id>            show it'));
+        surface.outputLine(chalk.dim('  /decide <id> <choice>   answer it'));
+        return;
+      }
+      if (!choice) {
+        const card = await fetchDecision(id);
+        const createdAt = Number(card.created_at) || 0;
+        const lines = [
+          chalk.bold('  ' + (card.title || '(untitled)')),
+          chalk.dim(`  ${card.id} · ${card.kind} · ${card.urgency} · ${fmtAge(ageSeconds(
+            { id: card.id, title: card.title, kind: card.kind, urgency: card.urgency, createdAt },
+            Date.now() / 1000))} old`),
+          '',
+          ...String(card.detail || card.summary || '').split('\n').map((l) => '  ' + l),
+          '',
+          chalk.cyan('  ' + formatOptions({
+            id: card.id, title: card.title, kind: card.kind, urgency: card.urgency, createdAt,
+            options: (card.options || []).map((o) => ({ key: o.key, label: o.label })),
+          })),
+          chalk.dim(`  answer: /decide ${card.id} <choice>`),
+        ];
+        await surface.showViewer(`DECIDE · ${card.id}`, lines);
+        return;
+      }
+      await answerDecision(id, choice);
+      surface.outputLine(chalk.green(`  ✓ answered ${id} = ${choice}`));
+      refreshStatusBar();
+    } catch (err) {
+      surface.outputLine(chalk.red(`  decide: ${(err as Error).message}`));
+    }
   }
 
   /** Build overlay lines from the live buffers and open the full-screen viewer. */
@@ -671,6 +741,9 @@ export async function startTuiRepl(client: GenesisClient, config: ShellConfig): 
       // Click a bar segment: brand → command palette; Aither → toggle inline portrait;
       // node/models/fabric → pop the full detail in a viewer (NOT the chat pane) + refresh.
       if (key === 'brand') { void openPicker(); return; }
+      // The beam: an ask segment opens ITS card; the count opens the list.
+      if (key.startsWith('decision:')) { void runCommand(`/decide ${key.slice('decision:'.length)}`); return; }
+      if (key === 'decisions') { void runCommand('/decide'); return; }
       if (key === 'portrait') { openOverlay('portrait'); return; }
       if (key === 'spend') { void runCommand('/spend'); return; }
       if (key === 'posture') { void runCommand('/posture'); return; }
@@ -1599,6 +1672,7 @@ export async function startTuiRepl(client: GenesisClient, config: ShellConfig): 
     const args = sp > 0 ? input.slice(sp + 1).trim() : '';
     if (!name) { await openPicker(); return; }
     if (name === 'clear' || name === 'cls') { surface.clearPanes(); idleStatus(); surface.focusInput(); return; }
+    if (name === 'decide' || name === 'decisions') { await handleDecide(args); surface.focusInput(); return; }
     if (name === 'help') { showHelp(); return; }
     if (CONTEXT_COMMANDS.includes(name)) {
       await handleContext(name, args); return;

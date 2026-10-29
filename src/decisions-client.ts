@@ -7,7 +7,7 @@
  * so this must not depend on backend resolution.
  */
 
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import * as theme from './theme.js';
@@ -141,6 +141,65 @@ function flag(args: string[], name: string, fallback = ''): string {
 
 function flagExists(args: string[], name: string): boolean {
   return args.includes(`--${name}`);
+}
+
+// ── The attention beam's IO half (src/beam.ts holds the pure ranking) ─────────
+//
+// Owner, 2026-10-28: the card that mattered sat unread while the HUD showed a
+// fleet that was fine. These exports let the TUI's top bar name the asks and
+// answer them without leaving it.
+
+/** Every open card, mapped for the beam. */
+export async function fetchBeamCards(): Promise<import('./beam.js').BeamCard[]> {
+  const res = await api<DecisionsResponse>('/decisions?status=open');
+  return (res.decisions || []).map((c) => ({
+    id: c.id,
+    title: c.title || c.summary || '(untitled)',
+    kind: c.kind,
+    urgency: c.urgency,
+    createdAt: Number(c.created_at) || 0,
+    options: (c.options || []).map((o) => ({ key: o.key, label: o.label })),
+    dedupeKey: (c as unknown as { dedupe_key?: string }).dedupe_key,
+    sourceSessionId: c.source?.session_id,
+  }));
+}
+
+/** The card in full, for the viewer opened from the bar. */
+export async function fetchDecision(id: string): Promise<Card> {
+  return api<Card>(`/decisions/${id}`);
+}
+
+/** Answer a card from inside the TUI. Never publishes anything by itself. */
+export async function answerDecision(id: string, choice: string, note = ''): Promise<void> {
+  await api(`/decisions/${id}/answer`, { method: 'POST', body: JSON.stringify({ choice, note }) });
+}
+
+/**
+ * Claude Code sessions that are alive AND not busy — the same rule the status
+ * line uses for `cc-waiting:` cards. A finished session's resolve hook never
+ * fires again, so its card would otherwise count forever (8 did, up to 13 days).
+ * Returns null when the directory cannot be read: unknown must not hide an ask.
+ */
+export async function liveWaitingSessionIds(): Promise<Set<string> | null> {
+  try {
+    const dir = join(homedir(), '.claude', 'sessions');
+    const names = readdirSync(dir);
+    const out = new Set<string>();
+    for (const name of names) {
+      if (!name.endsWith('.json')) continue;
+      try {
+        const raw = JSON.parse(readFileSync(join(dir, name), 'utf8'));
+        const pid = Number(raw?.pid);
+        if (!Number.isInteger(pid) || pid <= 0) continue;
+        if (String(raw?.status || '') === 'busy') continue;
+        process.kill(pid, 0);                       // throws when the process is gone
+        if (typeof raw?.sessionId === 'string') out.add(raw.sessionId);
+      } catch { /* one unreadable or dead record is not the whole answer */ }
+    }
+    return out;
+  } catch {
+    return null;
+  }
 }
 
 async function listCards(

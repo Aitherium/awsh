@@ -312,8 +312,10 @@ export interface StatusInfo {
    *  Absent when nothing was ever measured — never a zero nobody measured. */
   spend?: { text: string; low: boolean };
   /** The house posture in Veil's words (`Dark`, `Shop open`, ...), from
-   *  ~/.aither/posture-cache.json. Absent when nothing was measured in the last hour. */
-  posture?: { text: string; word: PostureWord | null; alert: boolean };
+   *  ~/.aither/posture-cache.json. Absent when nothing was measured in the last hour.
+   *  `next` is the house's next scheduled edge ("Shop open at 09:00"); it rides the
+   *  same cache read, so restating it costs nothing. */
+  posture?: { text: string; word: PostureWord | null; alert: boolean; next?: string };
 }
 
 const ROLE_ORDER = ['orchestrator', 'reasoning', 'perception', 'embeddings', 'fast-context', 'cloud', 'llm'];
@@ -517,15 +519,19 @@ export function formatStatusBar(info: StatusInfo): BarSegment[] {
       fam + (m.healthy ? '' : ' *'));
   }
 
-  // fabric — service health (compact)
+  // fabric — service health. A down count carries its REMEDY on the same segment
+  // (doctrine law 5: never a bare failure). `10 down` with nowhere to go is what the
+  // 2026-11-01 screenshot showed; `/doctor` is the one command that acts on it.
   const total = info.serviceLines.length;
   if (total) {
     const up = info.serviceLines.filter(s => s.up).length;
     const down = total - up;
-    const glyphC = down ? chalk.yellow('■') : chalk.green('■');
-    push('fabric', glyphC, '■',
-      down ? chalk.yellow(`${up}/${total}`) : chalk.green(`${up}/${total}`),
-      `${up}/${total}`);
+    if (down) {
+      const text = `${down} down · /doctor`;
+      push('fabric', chalk.yellow('■'), '■', chalk.yellow(text), text);
+    } else {
+      push('fabric', chalk.green('■'), '■', chalk.green(`${up}/${total} up`), `${up}/${total} up`);
+    }
   }
 
   // spend — cloud LLM $ over 24h; amber when the DeepSeek balance is low (click → /spend)

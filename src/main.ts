@@ -105,6 +105,8 @@ import { loadConfig, setActiveConfig, deepseekProvider, kimiProvider, DEFAULT_AG
 import { resolveBackend } from './backend-resolver.js';
 import { GenesisClient, VISION_MODEL } from './client.js';
 import { renderBanner, createStreamRenderer } from './renderer.js';
+import { computeNextAction } from './next-action.js';
+import { setPromptFacts } from './prompt-state.js';
 import { buildProbes, discoverLocalServices, probeHealth, pickServingModel } from './status-banner.js';
 import { startRepl } from './repl.js';
 import { installCrashReporter, setCurrentCommand } from './crash-reporter.js';
@@ -1495,6 +1497,17 @@ async function showBanner(client: GenesisClient, config: ShellConfig) {
 
   const upCount = serviceLines.filter(s => s.up).length;
   const authUser = config.authUser?.display_name || config.authUser?.username;
+  // The ONE next action, from data this banner already probed — no extra fetch, no
+  // extra round-trip. The same pure function the TUI paints; only the inputs differ
+  // (the inline boot has the fleet probes, the TUI also has the decision cards).
+  const down = serviceLines.filter(s => !s.up).map(s => s.name);
+  setPromptFacts({ down: down.length, total: serviceLines.length });
+  const plan = computeNextAction({
+    down,
+    total: serviceLines.length,
+    asks: [],
+    askCount: 0,
+  });
   renderBanner({
     genesis: host,
     genesisOnline,
@@ -1505,6 +1518,11 @@ async function showBanner(client: GenesisClient, config: ShellConfig) {
     serviceLines,
     backendType: backend.type,
     backendName: backend.name,
+    // This boot never fetched the decision cards, so `askCount` is 0 by CONSTRUCTION,
+    // not because nothing is waiting. Printing the function's `none` fallback here
+    // ("nothing waiting") would be a confident falsehood next to a 130-card inbox;
+    // say only what this surface actually knows.
+    nextLine: plan.verb === 'none' ? 'describe the task' : plan.line,
   });
 
   // Warm the orchestrator so the first real turn isn't cold (the "first blip").

@@ -235,6 +235,10 @@ export interface PostureCache {
   fetched_at: number | null;   // epoch SECONDS of the last good answer
   attempted_at: number | null;
   error: string | null;
+  /** The house's next scheduled edge ("Shop open at 09:00"). Kept so the boot
+   *  screen can say what is coming without a second gateway call — it used to be
+   *  read, printed by /posture, and then thrown away by the cache. */
+  next?: string | null;
 }
 
 export function readPostureCache(path = POSTURE_CACHE_PATH): PostureCache | null {
@@ -253,9 +257,14 @@ export function writePostureCache(cache: PostureCache, path = POSTURE_CACHE_PATH
   renameSync(tmp, path);
 }
 
-/** Status-bar text: '' (hide) unless a measured Veil label is cached and under an hour old. */
+/** Status-bar text: '' (hide) unless a measured Veil label is cached and under an hour old.
+ *
+ *  `next` rides along when the cache carries one: the same row that says `● Dark` can
+ *  also say what the house does next, and the boot screen needs it without a new call.
+ *  Omitted (not `undefined`-valued) when unknown, so the segment stays deep-equal to
+ *  the shape it had before for callers that compare it. */
 export function segmentFromCache(cache: PostureCache | null, nowS = Date.now() / 1000):
-  { text: string; word: PostureWord | null; alert: boolean } {
+  { text: string; word: PostureWord | null; alert: boolean; next?: string } {
   const fetched = num(cache?.fetched_at);
   const label = cache?.label || '';
   const entry = Object.entries(POSTURE_LABELS).find(([, l]) => l === label);
@@ -263,8 +272,10 @@ export function segmentFromCache(cache: PostureCache | null, nowS = Date.now() /
     return { text: '', word: null, alert: false };
   }
   const down = Array.isArray(cache?.surfacesDown) ? cache!.surfacesDown : [];
+  const next = typeof cache?.next === 'string' ? cache.next.trim() : '';
   return { text: label + (down.length ? ` · ${down.join(',')} down` : ''),
-    word: entry[0] as PostureWord, alert: down.length > 0 };
+    word: entry[0] as PostureWord, alert: down.length > 0,
+    ...(next ? { next } : {}) };
 }
 
 export function cacheNeedsRefresh(cache: PostureCache | null, nowS = Date.now() / 1000): boolean {
@@ -281,10 +292,12 @@ export function recordPosture(payload: unknown, path = POSTURE_CACHE_PATH,
   const cache: PostureCache = {
     label: prior?.label ?? null, surfacesDown: prior?.surfacesDown ?? [],
     fetched_at: prior?.fetched_at ?? null, attempted_at: nowS, error: null,
+    next: prior?.next ?? null,
   };
   if (view.label !== 'unknown') {
     cache.label = view.label;
     cache.surfacesDown = view.surfaces.filter(s => !s.up).map(s => s.label);
+    cache.next = view.next || null;
     cache.fetched_at = nowS;
   } else {
     cache.error = view.problem || 'unknown posture';
@@ -302,7 +315,7 @@ let refreshing: Promise<PostureCache> | null = null;
 
 /** Status-bar segment: reads the cache NOW, kicks a background refresh when stale. */
 export function postureBarSegment(call: ToolCaller = callGatewayTool, path = POSTURE_CACHE_PATH):
-  { text: string; word: PostureWord | null; alert: boolean } {
+  { text: string; word: PostureWord | null; alert: boolean; next?: string } {
   const cache = readPostureCache(path);
   if (cacheNeedsRefresh(cache) && !refreshing) {
     refreshing = refreshPostureCache(call, path).finally(() => { refreshing = null; });

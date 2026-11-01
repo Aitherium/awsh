@@ -30,6 +30,7 @@ import chalk from 'chalk';
 // See wide-chars.ts for the measurement and why a headless repro
 // cannot see it.
 import './wide-chars.js';
+import { fitSegments, fitText } from './status-bar-fit.js';
 
 const nodeRequire = createRequire(import.meta.url);
 const blessed: any = nodeRequire('neo-blessed');
@@ -486,7 +487,13 @@ export function createTuiScreen(opts: TuiScreenOpts): TuiSurface {
       toggleTurnAtRow(row);
     } catch { /* */ }
   });
-  function setStatus(text: string): void { status.setContent('  ' + (text || '')); scheduleRender(); }
+  // Fit the row instead of overflowing it: a one-line HUD that wraps costs two rows
+  // and the second one is a ragged fragment (see status-bar-fit.ts).
+  function setStatus(text: string): void {
+    const columns = process.stdout.columns || 80;
+    status.setContent('  ' + fitText(text || '', Math.max(8, columns - 2)));
+    scheduleRender();
+  }
 
   // ── Persistent clickable status bar ───────────────────────────
   // Segments are laid out left→right separated by " │ "; we record each segment's
@@ -497,9 +504,26 @@ export function createTuiScreen(opts: TuiScreenOpts): TuiSurface {
   function setStatusBar(segments: { key: string; text: string; plain: string }[]): void {
     try {
       barRanges = [];
+      // Keep what FITS and count the rest. The brand (segment 0) is never dropped:
+      // its fixed position is how the row is recognised at a glance.
+      const columns = process.stdout.columns || 80;
+      // Reserve the leading space: fitSegments budgets the JOINED width, and the row
+      // is printed as `' ' + segments`. Without the -1 a row that exactly fills the
+      // terminal wraps one cell onto the next line.
+      const { kept, hidden } = fitSegments(segments, Math.max(1, columns - 1), BAR_SEP);
+      const shown = kept.slice();
+      let used = 1;  // the leading space
+      for (let i = 0; i < shown.length; i++) used += (i ? BAR_SEP_W : 0) + shown[i].plain.length;
+      if (hidden > 0) {
+        const plain = '+' + hidden;
+        // Only when the count itself fits — a clipped "+1" is worse than none.
+        if (used + BAR_SEP_W + plain.length <= columns) {
+          shown.push({ key: 'more', text: chalk.dim(plain), plain });
+        }
+      }
       let content = ' ';
       let col = 1;  // leading space
-      segments.forEach((s, i) => {
+      shown.forEach((s, i) => {
         if (i) { content += BAR_SEP; col += BAR_SEP_W; }
         const start = col;
         content += s.text;

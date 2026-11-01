@@ -15,6 +15,7 @@ import { spawn } from 'child_process';
 import type { SSEEvent } from './client.js';
 import { getActiveConfig } from './config.js';
 import { stripWrappingFence } from './tui/chat-formatter.js';
+import { fitText } from './tui/status-bar-fit.js';
 // The ONE design system (palette, gradient wordmark, hairline rules, status
 // dots, glyphs). Namespaced so every styled surface here is obviously themed.
 import * as T from './theme.js';
@@ -219,6 +220,10 @@ export function renderBanner(info: {
   serviceLines?: { name: string; up: boolean }[];
   backendType?: string;
   backendName?: string;
+  /** The ONE next action, already computed (`computeNextAction().line`). The inline
+   *  boot prints it under the status line: "Connected · 1 service · 10 down" used to
+   *  be the whole screen, and the owner's next move was left to working memory. */
+  nextLine?: string;
   // Explicit override for terminal width, so a test can control it
   // directly instead of mutating process.stdout.columns via
   // Object.defineProperty. That mutation is provably environment-dependent
@@ -253,18 +258,7 @@ export function renderBanner(info: {
   const downNames = probed.filter(s => !s.up).map(s => s.name);
   const upCount = upNames.length;
 
-  const parts = [
-    info.services != null ? `${info.services} services` : (upCount > 0 ? `${upCount} services` : null),
-    info.agents != null ? `${info.agents} agents` : null,
-    info.llm ? info.llm : null,
-  ].filter(Boolean);
-  const stats = parts.join(' \u00b7 ') || 'no services detected';
   const userLine = info.user ? `Logged in as ${info.user}` : '';
-
-  // Build the service detail lines: "up: vLLM, ComfyUI, ..."  "down: Watch, ..."
-  const detailLines: string[] = [];
-  if (upNames.length > 0) detailLines.push(`UP: ${upNames.join(', ')}`);
-  if (downNames.length > 0) detailLines.push(`DN: ${downNames.join(', ')}`);
 
   // MODERN LANGUAGE (2026-07-24): the old flat-cyan ASCII box with `UP:`/`DN:`
   // caps was a SECOND visual language in a shell whose boot header had already
@@ -290,7 +284,8 @@ export function renderBanner(info: {
   // count, then the model, then the service count -- so what survives at any
   // width is the one thing that changes what you do next: is the link up, and
   // to what.
-  const budget = Math.max(40, (info.columns ?? process.stdout.columns ?? 80) - 4);
+  const columns = info.columns ?? process.stdout.columns ?? 80;
+  const budget = Math.max(40, columns - 4);
   // Counted by scanning, not by a regex: an ANSI-stripping pattern needs a
   // literal ESC and a backslash class, and every edit through a shell has
   // silently mangled one or the other in this file today. This needs neither.
@@ -314,6 +309,9 @@ export function renderBanner(info: {
   const optional: string[] = [];
   if (info.services != null) optional.push(`${info.services} services`);
   else if (upCount > 0) optional.push(`${upCount} services`);
+  // The NUMERIC fabric count — `N/M up` — so the header answers "how much of the fleet"
+  // with a ratio rather than only a total. Same data, one read.
+  if (probed.length > 0) optional.push(`${upCount}/${probed.length} up`);
   if (downNames.length > 0) optional.push(`${downNames.length} down`);
   if (info.agents != null) optional.push(`${info.agents} agents`);
   if (info.llm) optional.push(info.llm);
@@ -322,11 +320,21 @@ export function renderBanner(info: {
     const candidate = statusLine + T.dim('  ·  ') + T.dim(seg);
     if (visible(candidate) <= budget) statusLine = candidate;
   }
-  console.log();
-  console.log('  ' + T.wordmark() + '  ' + T.dim(version));
-  console.log('  ' + statusLine);
+  // ONE line, fitted to the REAL terminal. The 40-column floor above lets the status
+  // line compose at widths it cannot print (`● Connected to …` is 48 cells even at 40
+  // columns, which wrapped onto a ragged second row); every line that leaves this
+  // function is now ellipsized to the width it will be printed at.
+  const emit = (line: string): void => { console.log(fitText(line, columns)); };
+  emit('');
+  emit('  ' + T.wordmark() + '  ' + T.dim(version));
+  emit('  ' + statusLine);
+  // ONE next action, directly under the state line that produced it (doctrine law 1).
+  if (info.nextLine) {
+    emit('  ' + T.accent('NEXT') + ' '
+      + T.dim(fitText(info.nextLine, Math.max(8, columns - 7))));
+  }
   if (userLine) {
-    console.log('  ' + T.violet(T.G.agent) + ' ' + T.dim(userLine));
+    emit('  ' + T.violet(T.G.agent) + ' ' + T.dim(userLine));
   }
 }
 

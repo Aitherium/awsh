@@ -60,10 +60,23 @@ test('a needs-you card of a dead session is not an ask; of a live one it is', ()
 test('the bar names asks with their id and age, and a click maps back to the card', () => {
   const beam = rankBeam([card({ id: 'd-ts7e', title: 'Election Day is Tuesday', urgency: 'high' })], NOW);
   const segs = formatBeam(beam, NOW, 120);
-  assert.ok(segs[0].plain.startsWith('d-ts7e 10m Election Day'), segs[0].plain);
+  // The LEADING segment carries the verb, so the row is an instruction, not a ledger
+  // of ids the reader has to remember how to answer. Mutation: drop the verb -> fails.
+  assert.ok(segs[0].plain.startsWith('answer d-ts7e 10m Election Day'), segs[0].plain);
   assert.equal(segs[0].key, 'decision:d-ts7e');
   assert.equal(segs.at(-1)?.key, 'decisions');
   assert.match(segs.at(-1)!.plain, /\(\+0, 1 open\)/);
+});
+
+test('a blocked card leads with run, a credential with answer, and only the first', () => {
+  const blocked = formatBeam(rankBeam([card({ id: 'd-blk', kind: 'blocked', options: [] })], NOW), NOW, 200);
+  assert.ok(blocked[0].plain.startsWith('run d-blk'), blocked[0].plain);
+  const two = formatBeam(rankBeam([
+    card({ id: 'd-one', urgency: 'high', createdAt: NOW - 60 }),
+    card({ id: 'd-two', urgency: 'high', createdAt: NOW - 30 }),
+  ], NOW), NOW, 200);
+  assert.ok(two[0].plain.startsWith('answer d-two'), two[0].plain);
+  assert.ok(two[1].plain.startsWith('d-one'), 'only the leading ask repeats the verb');
 });
 
 test('nothing waiting renders nothing (no permanent zero)', () => {

@@ -31,8 +31,11 @@ import { collectArgs } from '../interactive.js';
 import { personaEmotion, personaIdle, personaLevel, personaSpeaking } from '../awdesk-bridge.js';
 import { gatherStatus, formatStatusLines, formatStatusBar, formatWelcomeHeader, type StatusInfo } from '../status-banner.js';
 import {
-  ageSeconds, beamEmotion, fmtAge, formatBeam, formatOptions, isHot, rankBeam,
+  ageSeconds, beamEmotion, fmtAge, formatBeam, formatOptions, isHot, rankBeam, type Beam,
 } from '../beam.js';
+import { computeNextAction, type NextPlan } from '../next-action.js';
+import { setPromptFacts } from '../prompt-state.js';
+import { fitText } from './status-bar-fit.js';
 import {
   answerDecision, fetchBeamCards, fetchDecision, liveWaitingSessionIds,
 } from '../decisions-client.js';
@@ -204,9 +207,21 @@ export async function startTuiRepl(client: GenesisClient, config: ShellConfig): 
 
   function idleStatus(): void {
     const running = runningCount();
-    const bits = ['ready', gpuTag, running > 0 ? `${running} job${running > 1 ? 's' : ''}` : '']
-      .filter(Boolean).join(' · ');
-    surface.setStatus(bits);
+    // Restate state every turn (law 3): the strip says where the reader is, so nothing
+    // that scrolled off the top has to be held in working memory. A count always rides
+    // its own noun — "10 down" with no verb is the line the owner screenshotted.
+    const bits = ['ready'];
+    const waiting = lastRanked ? lastRanked.open : 0;
+    if (waiting > 0) bits.push(`${waiting} waiting`);
+    const total = lastStatusInfo?.serviceLines.length ?? 0;
+    if (total) {
+      const up = lastStatusInfo!.serviceLines.filter((s) => s.up).length;
+      bits.push(`${up}/${total} up`);
+    }
+    if (lastStatusInfo?.spend?.text) bits.push(lastStatusInfo.spend.text);
+    if (gpuTag) bits.push(gpuTag);
+    if (running > 0) bits.push(`${running} job${running > 1 ? 's' : ''}`);
+    surface.setStatus(fitText(bits.join(' · '), Math.max(8, (process.stdout.columns || 80) - 2)));
   }
 
   // ── AitherSense affect poller + AitherVoice (opt-in) + portrait art ──
@@ -303,8 +318,49 @@ export async function startTuiRepl(client: GenesisClient, config: ShellConfig): 
   let lastFiles: FileEntry[] = [];
   const attachedPaths: string[] = [];
   let lastStatusInfo: StatusInfo | null = null;
+  /** Last ranked beam: the idle strip and the prompt both restate its count. */
+  let lastRanked: Beam | null = null;
+  /** The boot screen has not yet said what to do next. Cleared after the first paint. */
+  let bootNextPending = true;
   /** Last beam state seen, so a new ask fires the avatar exactly once. */
   let beamHot = false;
+
+  /** The HOME block: one NEXT line, at most five numbered asks, the count of the rest,
+   *  and one context line. Written once, after the first status refresh resolves, so
+   *  the boot screen answers "what do I do now" before the reader has to ask. */
+  function paintHomeNext(plan: NextPlan): void {
+    surface.outputLine(chalk.bold('NEXT ') + plan.line);
+    for (const item of plan.items) {
+      surface.outputLine(chalk.dim(`  ${item.n}. `) + item.label);
+    }
+    // Cap presentation, never data: the rest is counted and one command reveals it.
+    // When NO rows are shown (`more` is the whole open count, e.g. every ask is older
+    // than a day), the NEXT line already says `<N> waiting — /decide`; a second
+    // "130 more — /decide" would be the same sentence twice.
+    if (plan.items.length > 0 && plan.more > 0) {
+      surface.outputLine(chalk.dim(`  ${plan.more} more — /decide`));
+    }
+    const ctx = [
+      lastStatusInfo?.backendName,
+      lastStatusInfo?.models[0]?.model,
+      lastStatusInfo?.posture?.word,
+    ].filter(Boolean).join(' · ');
+    if (ctx) surface.outputLine(chalk.dim('  ' + ctx));
+  }
+
+  /** The one NEXT plan, built from data this refresh already fetched (no new IO). */
+  function nextPlan(info: StatusInfo | null, ranked: Beam, nowSec: number): NextPlan {
+    return computeNextAction({
+      down: info ? info.serviceLines.filter((s) => !s.up).map((s) => s.name) : [],
+      total: info ? info.serviceLines.length : 0,
+      asks: ranked.fresh.map((c) => ({
+        id: c.id, title: String(c.title || ''), ageSec: ageSeconds(c, nowSec), hot: isHot(c),
+      })),
+      askCount: ranked.open,
+      critical: info?.criticalActions,
+      postureNext: info?.posture?.next,
+    });
+  }
 
   /** Re-probe the fleet and repaint the persistent status bar (silent — never dumps
    *  into the chat pane). Called at startup and on a bar click.
@@ -324,19 +380,32 @@ export async function startTuiRepl(client: GenesisClient, config: ShellConfig): 
       const nowSec = Date.now() / 1000;
       const width = Math.max(40, Math.floor((process.stdout.columns || 120) * 0.62));
       const ranked = rankBeam(cards, nowSec, live);
+      lastRanked = ranked;
+      // The prompt carries the same facts the strip does (law 3), from ONE module, so
+      // the two rows can never disagree about how much is waiting.
+      const down = info ? info.serviceLines.filter((s) => !s.up).map((s) => s.name) : [];
+      // `open` is EVERY ask still waiting (fresh + older). `fresh` is only the last
+      // day's; using fresh here made the prompt say `3?` while the strip beside it
+      // said `130 waiting` — two rows disagreeing about the same fact (law 3).
+      setPromptFacts({
+        asks: ranked.open,
+        down: down.length,
+        total: info ? info.serviceLines.length : 0,
+      });
       const beamSegs = formatBeam(ranked, nowSec, width, {
         red: chalk.red, amber: chalk.yellow, dim: chalk.dim, bold: chalk.bold,
       });
       // A NEW ask changes Aither's face, on the docked pane and on the awdesk
-      // avatar, and says so on the status strip. Edge-triggered: a poll every few
-      // seconds must not re-fire it (and must not fight the affect poller).
+      // avatar. Edge-triggered: a poll every few seconds must not re-fire it (and
+      // must not fight the affect poller). The COUNT no longer lands here — it lives
+      // in the idle state line and the NEXT block, instead of a third place that
+      // replaced the state line whenever an ask appeared.
       const hotAsk = beamEmotion(ranked) !== null;
       if (hotAsk !== beamHot) {
         beamHot = hotAsk;
         if (hotAsk) {
           updateAvatarEmotion('curious');
           personaEmotion('curious');
-          surface.setStatus(`⚡ ${ranked.fresh.length} asking — /decide`);
         } else {
           updateAvatarEmotion('neutral');
           personaEmotion('neutral');
@@ -345,6 +414,14 @@ export async function startTuiRepl(client: GenesisClient, config: ShellConfig): 
       // After the brand so the wordmark keeps its place; before the fleet facts,
       // which the eye may skim but which never needed an answer.
       surface.setStatusBar(segs.length ? [segs[0], ...beamSegs, ...segs.slice(1)] : beamSegs);
+      // The home block, once: a shell that opens on "ready" and a cursor makes the
+      // reader supply the next action from memory. Only on the first refresh, and
+      // never over a turn that is already running.
+      if (bootNextPending && !processing) {
+        bootNextPending = false;
+        paintHomeNext(nextPlan(info, ranked, nowSec));
+        idleStatus();
+      }
     }).catch(() => { /* status bar is best-effort */ });
   }
 

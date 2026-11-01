@@ -136,6 +136,14 @@ export interface BeamPaint {
 
 const IDENTITY: BeamPaint = { red: (s) => s, amber: (s) => s, dim: (s) => s, bold: (s) => s };
 
+/** The verb that turns a card id into an instruction: a lock is something to RUN,
+ *  everything else is something to ANSWER. The bar used to name the ask and stop,
+ *  leaving the reader to remember that `d-ts7e` meant `/decide d-ts7e` (doctrine
+ *  law 1: lead with the next action, measured 2026-11-01). */
+export function beamVerb(card: BeamCard): 'run' | 'answer' {
+  return String(card.kind || '').toLowerCase() === 'blocked' ? 'run' : 'answer';
+}
+
 /**
  * The bar segments for a beam: one clickable segment per named ask, then a count.
  *
@@ -151,7 +159,10 @@ export function formatBeam(beam: Beam, nowSec: number, width: number, paint: Bea
   let budget = Math.max(16, width - 20);
   const shown: BeamSegment[] = [];
   for (const card of beam.fresh.slice(0, BEAM_MAX)) {
-    const lead = `${card.id} ${fmtAge(ageSeconds(card, nowSec))} `;
+    // The LEADING ask carries the verb; the ones after it stay bare so the row is not
+    // a wall of repeated words ("answer … answer … answer …").
+    const verb = shown.length === 0 ? `${beamVerb(card)} ` : '';
+    const lead = verb + `${card.id} ${fmtAge(ageSeconds(card, nowSec))} `;
     const title = String(card.title || '').replace(/\s+/g, ' ').trim();
     const room = budget - lead.length - (shown.length ? 3 : 0);
     if (room < 12) break;                      // no useful title fits: let the count carry it

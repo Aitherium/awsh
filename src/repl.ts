@@ -26,6 +26,7 @@ import { RelayClient, resolveRelayUrl, type RelayMessage, type RelayUser } from 
 import { isRelayOneShot } from './relay-command.js';
 import { createStreamRenderer, SteeringBar, type SessionProfile } from './renderer.js';
 import { stripFenceDelimiters } from './tui/chat-formatter.js';
+import { promptLabel } from './prompt-state.js';
 import { getCommand, getCommandNames } from './commands.js';
 import { resolveFallback, runFallback, formatFallbackOutput } from './command-fallback.js';
 import { getCommandRegistry } from './command-registry.js';
@@ -329,10 +330,16 @@ export async function startRepl(client: GenesisClient, config: ShellConfig): Pro
     }
   }
 
-  /** Build prompt with running job count and GPU status. */
+  /** Build prompt with the pending state, running job count and GPU status.
+   *
+   *  The state label comes from prompt-state.ts, so the readline prompt and the TUI
+   *  strip state the same facts: `awsh[3?] >` is the one line the eye returns to
+   *  before typing, and it is the cheapest place to say what is waiting (law 3). */
   function buildPrompt(): string {
     const running = runningCount();
     const parts: string[] = [];
+    const label = promptLabel();
+    if (label) parts.push(label);
     if (running > 0) parts.push(String(running));
     if (gpuTag) parts.push(gpuTag);
     const suffix = parts.length > 0

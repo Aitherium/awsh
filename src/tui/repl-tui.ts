@@ -34,6 +34,7 @@ import {
   ageSeconds, beamEmotion, fmtAge, formatBeam, formatOptions, isHot, rankBeam, type Beam,
 } from '../beam.js';
 import { computeNextAction, type NextPlan } from '../next-action.js';
+import { resumeLines } from '../resume-line.js';
 import { setPromptFacts } from '../prompt-state.js';
 import { fitText } from './status-bar-fit.js';
 import {
@@ -329,6 +330,8 @@ export async function startTuiRepl(client: GenesisClient, config: ShellConfig): 
    *  and one context line. Written once, after the first status refresh resolves, so
    *  the boot screen answers "what do I do now" before the reader has to ask. */
   function paintHomeNext(plan: NextPlan): void {
+    // WHERE YOU LEFT OFF (session-focus records), above NEXT; [] when missing/stale.
+    resumeLines().forEach((l, i) => surface.outputLine(i ? chalk.dim(l) : l));
     surface.outputLine(chalk.bold('NEXT ') + plan.line);
     for (const item of plan.items) {
       surface.outputLine(chalk.dim(`  ${item.n}. `) + item.label);

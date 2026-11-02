@@ -4,27 +4,45 @@
  * The data is the EXISTING session focus tracker (`.claude/hooks/session-focus.py`):
  * its Stop hook writes one record per session to
  * `~/.aither/focus/<project-key>/<session_id>.json` with `first_ask`, `last_ask`,
- * `next` (the closing report's `NEXT:` step) and `updated` (epoch seconds). Session
- * titles named by the local model live in `~/.aither/session-labels/<sid>.json`.
- * This module only READS those files — it is not a second tracker.
+ * `next` (the closing report's `NEXT:` step), `transcript`, `project` and `updated`
+ * (epoch seconds). Session titles named by the local model live in
+ * `~/.aither/session-labels/<sid>.json`. This module only READS those files.
  *
  * Output, above the NEXT block:
  *   Last: making the Iris song (2 h ago) — next: approve the lyrics draft
- *     2 more threads (4ff63b67, b03083e3) — python .claude/hooks/session-focus.py --show <id>
+ *     2 more threads
+ *
+ * Only OWNER-launched threads count. Excluded, each by a marker the data carries:
+ *   - a non-`cli` `entrypoint` in the transcript head (`sdk-cli` = spawned by a
+ *     program: awdesk card callbacks, forge, workflows);
+ *   - a transcript outside `~/.claude/projects/` (harness/test event logs);
+ *   - a project dir under a temp or worktree path;
+ *   - a first ask that is a machine preamble (card answers, crash-resume launcher).
+ * The "+N more" line counts only threads touched in the last 24 h and is dropped at 0.
+ * It carries no hint: awsh has no command that lists these threads.
  *
  * Silent by contract: missing dir, unreadable or malformed records, or nothing newer
  * than three days all yield `[]` — never an error line. `AWSH_RESUME=0` disables it.
  */
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { closeSync, openSync, readSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
 /** Records older than this are not "where you left off" any more. */
 export const RESUME_MAX_AGE_SEC = 3 * 86400;
-/** The hook's own `--show` read; the affordance that reveals the other threads. */
-const SHOW_CMD = 'python .claude/hooks/session-focus.py --show <id>';
-const GOAL_MAX = 70;
+/** Other threads count toward "+N more" only while touched this recently. */
+export const LIVE_THREAD_SEC = 86400;
+const GOAL_MAX = 60;
 const NEXT_MAX = 90;
+/** Bytes of the transcript head read for its `entrypoint` marker. */
+const HEAD_BYTES = 16 * 1024;
+
+/** First asks written by a program, not typed by the owner. */
+const MACHINE_ASK = [
+  /^owner answered (credential |decision )?card\b/i,
+  /^you are helping the user resume\b/i,
+  /^<(task-notification|command-name)/i,
+];
 
 export interface FocusRecord {
   sessionId: string;
@@ -48,7 +66,32 @@ export function clip(text: string, max: number): string {
   if (s.length <= max) return s;
   const cut = s.slice(0, max - 1);
   const sp = cut.lastIndexOf(' ');
-  return (sp > max / 2 ? cut.slice(0, sp) : cut).replace(/[\s,;:.—-]+$/, '') + '…';
+  return (sp > max / 2 ? cut.slice(0, sp) : cut).replace(/[\s,;:.—+&/-]+$/, '') + '…';
+}
+
+/** A readable title: paste/image markers gone, URLs reduced to their last path
+ *  segment (`https://github.com/wizzense/i-have-adhd` → `i-have-adhd`), whitespace
+ *  collapsed, clipped at 60 on a word boundary. */
+export function cleanTitle(text: string, max: number = GOAL_MAX): string {
+  const raw = String(text || '');
+  // A title the labeller already clipped keeps an honest ellipsis after cleaning.
+  const wasClipped = /…\s*$/.test(raw.replace(/\[(Image|Pasted text)[^\]]*\]/gi, '').trim());
+  const s = raw
+    .replace(/\[(Image|Pasted text)[^\]]*\]/gi, ' ')
+    .replace(/\bhttps?:\/\/[^\s)\]>'"]+/gi, (url) => {
+      const path = url.replace(/[?#].*$/, '').replace(/[/.,;:]+$/, '');
+      const parts = path.split('/').filter(Boolean);
+      return parts.length > 1 ? parts[parts.length - 1] : '';
+    })
+    .replace(/…/g, ' ') // a label generator's own clip mark; ours is re-added below
+    .replace(/\s+/g, ' ')
+    // `url -- [Image #1] -- text` leaves `-- --` runs once the markers are gone.
+    .replace(/(?:\s+(?:--+|—)(?=\s))+/g, ' —')
+    .trim()
+    .replace(/^[-—:|,.\s]+/, '')
+    .replace(/[-—:|,\s]+$/, '');
+  const out = clip(s, max);
+  return wasClipped && out && !out.endsWith('…') ? out.replace(/[\s+&/]+$/, '') + '…' : out;
 }
 
 /** "2 h ago" / "15 min ago" / "3 d ago" — specific, never vague. */
@@ -59,24 +102,60 @@ export function ageWords(sec: number): string {
   return `${Math.floor(s / 86400)} d ago`;
 }
 
+/** The model-named session title. A `source: "fallback"` label is only the first ask
+ *  pre-clipped by the labeller, so the full first ask (cleaned here) beats it. */
 function readTitle(labelsDir: string, sid: string): string {
   const safe = sid.replace(/[^A-Za-z0-9-]/g, '');
   if (!safe) return '';
   try {
-    const t = JSON.parse(readFileSync(join(labelsDir, `${safe}.json`), 'utf8'))?.title;
-    return typeof t === 'string' ? t : '';
+    const label = JSON.parse(readFileSync(join(labelsDir, `${safe}.json`), 'utf8'));
+    if (label?.source === 'fallback') return '';
+    return typeof label?.title === 'string' ? label.title : '';
   } catch {
     return '';
   }
 }
 
-/** Fresh focus records, newest first, one per session. Never throws. */
+/** The transcript's `entrypoint` ("cli" when the owner typed `claude`), or '' when
+ *  the head cannot be read — unknown is not evidence, so it is not excluded. */
+export function transcriptEntrypoint(path: string): string {
+  if (!path) return '';
+  let fd: number | undefined;
+  try {
+    fd = openSync(path, 'r');
+    const buf = Buffer.alloc(HEAD_BYTES);
+    const n = readSync(fd, buf, 0, HEAD_BYTES, 0);
+    const m = /"entrypoint"\s*:\s*"([^"]+)"/.exec(buf.subarray(0, n).toString('utf8'));
+    return m ? m[1] : '';
+  } catch {
+    return '';
+  } finally {
+    if (fd !== undefined) {
+      try { closeSync(fd); } catch { /* already closed */ }
+    }
+  }
+}
+
+/** True when the record carries a marker of a program-launched session. */
+export function isMachineSession(r: Record<string, unknown>): boolean {
+  const ask = typeof r.first_ask === 'string' ? r.first_ask.trim() : '';
+  if (MACHINE_ASK.some((re) => re.test(ask))) return true;
+  const project = typeof r.project === 'string' ? r.project.replace(/\\/g, '/') : '';
+  if (/\/(te?mp|worktrees?|\.worktrees)\//i.test(project + '/')) return true;
+  const transcript = typeof r.transcript === 'string' ? r.transcript : '';
+  if (transcript && !/[\\/]\.claude[\\/]projects[\\/]/.test(transcript)) return true;
+  const entry = transcriptEntrypoint(transcript);
+  return entry !== '' && entry !== 'cli';
+}
+
+/** Fresh OWNER focus records, newest first, one per session. Never throws. */
 export function loadFocusRecords(opts: ResumeOptions = {}): FocusRecord[] {
   const root = opts.focusDir ?? (process.env.AITHER_FOCUS_DIR || join(homedir(), '.aither', 'focus'));
   const labels = opts.labelsDir
     ?? (process.env.AWRELAY_SESSION_LABELS?.trim() || join(homedir(), '.aither', 'session-labels'));
   const now = opts.nowSec ?? Date.now() / 1000;
   const bySid = new Map<string, FocusRecord>();
+  const machine = new Set<string>();
   let projects: string[];
   try {
     projects = readdirSync(root);
@@ -100,11 +179,17 @@ export function loadFocusRecords(opts: ResumeOptions = {}): FocusRecord[] {
         if (!r || typeof r !== 'object' || Array.isArray(r)) continue;
         const updated = Number(r.updated);
         const sid = typeof r.session_id === 'string' ? r.session_id : '';
-        if (!sid || !Number.isFinite(updated) || now - updated > RESUME_MAX_AGE_SEC) continue;
-        const goal = readTitle(labels, sid) || (typeof r.first_ask === 'string' ? r.first_ask : '');
-        if (!goal.trim()) continue;
+        if (!sid || machine.has(sid)) continue;
+        if (!Number.isFinite(updated) || now - updated > RESUME_MAX_AGE_SEC) continue;
         const prev = bySid.get(sid);
         if (prev && prev.updated >= updated) continue;
+        if (!prev && isMachineSession(r)) {
+          machine.add(sid);
+          continue;
+        }
+        const ask = typeof r.first_ask === 'string' ? r.first_ask : '';
+        const goal = cleanTitle(readTitle(labels, sid)) || cleanTitle(ask);
+        if (!goal) continue;
         bySid.set(sid, {
           sessionId: sid,
           goal,
@@ -120,19 +205,18 @@ export function loadFocusRecords(opts: ResumeOptions = {}): FocusRecord[] {
   return [...bySid.values()].sort((a, b) => b.updated - a.updated);
 }
 
-/** The home lines for a set of records: the newest thread, then the count of the rest. */
+/** The home lines: the newest owner thread, then the count of the other LIVE ones. */
 export function formatResume(recs: FocusRecord[], nowSec: number = Date.now() / 1000): string[] {
   const top = recs[0];
   if (!top) return [];
-  let line = `Last: ${clip(top.goal, GOAL_MAX)} (${ageWords(nowSec - top.updated)})`;
-  if (top.next.trim()) line += ` — next: ${clip(top.next, NEXT_MAX)}`;
-  const out = [line];
-  const more = recs.length - 1;
-  if (more > 0) {
-    const ids = recs.slice(1, 4).map((r) => r.sessionId.slice(0, 8)).join(', ');
-    const tail = more > 3 ? ', …' : '';
-    out.push(`  ${more} more thread${more === 1 ? '' : 's'} (${ids}${tail}) — ${SHOW_CMD}`);
+  let line = `Last: ${top.goal} (${ageWords(nowSec - top.updated)})`;
+  // "nothing for you …" is a closing courtesy, not a step the reader can take.
+  if (top.next.trim() && !/^nothing\b/i.test(top.next.trim())) {
+    line += ` — next: ${clip(top.next, NEXT_MAX)}`;
   }
+  const out = [line];
+  const more = recs.slice(1).filter((r) => nowSec - r.updated <= LIVE_THREAD_SEC).length;
+  if (more > 0) out.push(`  ${more} more thread${more === 1 ? '' : 's'}`);
   return out;
 }
 

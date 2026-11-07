@@ -10,7 +10,21 @@
   "pairs_with": [
     "awdk",
     "awfind",
-    "awbrowse"
+    "awbrowse",
+    "awembed",
+    "awdesk",
+    "awvoice",
+    "awrelay"
   ],
-  "includes": []
+  "includes": [],
+  "metrics": {
+    "files": {
+      "value": 1252,
+      "as_of": "2026-11-07T06:02:39Z"
+    },
+    "tests": {
+      "value": 105,
+      "as_of": "2026-11-07T06:02:39Z"
+    }
+  }
 }

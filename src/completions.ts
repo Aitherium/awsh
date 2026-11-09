@@ -411,6 +411,20 @@ export const SUBCOMMAND_DEFS: Record<string, [string, string][]> = {
     ['sync', ''],
     ['pull', ''],
   ],
+  '/packs': [
+    ['search', '<query>'],
+    ['install', '<id> [--allow-community]'],
+    ['enable', '<id>'],
+    ['update', '[id]'],
+    ['remove', '<id>'],
+    ['info', '<id>'],
+  ],
+  '/skills': [
+    ['search', '<query>'],
+    ['install', '<name> [--target claude|project|adk]'],
+    ['update', '<name>'],
+    ['remove', '<name>'],
+  ],
   '/explore': [
     ['all', '[--free]'],
     ['agents', '[--free]'],

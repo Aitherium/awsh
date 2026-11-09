@@ -861,9 +861,26 @@ const COMMANDS: Record<string, Command> = {
     },
   },
 
+  packs: {
+    description: 'Find and install add-ons (awpack, Library, awnode ext) via adk',
+    usage: '/packs search|install|enable|update|remove|info <id>',
+    handler: async (_client: GenesisClient, args: string) => {
+      const { runPacksCommand, splitArgs } = await import('./packs-command.js');
+      const rc = runPacksCommand('pack', splitArgs(args));
+      if (rc !== 0) process.exitCode = rc;
+    },
+  },
   skills: {
-    description: 'Skills reachable from here: host daemon | genesis | drift',
-    handler: async (client) => {
+    description: 'Skills: reachability (host | genesis | drift), or search|install|update|remove <name>',
+    usage: '/skills [search|install|update|remove <name> [--target claude|project|adk]]',
+    handler: async (client: GenesisClient, args: string = '') => {
+      const { runPacksCommand, splitArgs } = await import('./packs-command.js');
+      const words = splitArgs(args);
+      if (words.length) {
+        const rc = runPacksCommand('skills', words);
+        if (rc !== 0) process.exitCode = rc;
+        return;
+      }
       const spinner = ora('Counting skills...').start();
       // host: the harness daemon reads <cwd>/.claude and ~/.claude; genesis: the
       // fleet plane (assets/skills + the mounted .claude/skills). Drift = names on
@@ -2811,7 +2828,13 @@ const COMMANDS: Record<string, Command> = {
       }
 
       if (catalog.length === 0) {
-        console.log(chalk.yellow('\n  No catalog available. Install awdk or connect to Genesis.\n'));
+        // No Genesis catalog and no packs_catalog.json: ask the installed adk, which
+        // also reads the awpack shelf and awnode ext. Nothing answering is a FAILURE
+        // with its reason (exit 1), never "No catalog" with exit 0.
+        const { exploreViaAdk } = await import('./packs-command.js');
+        const q = category === 'all' ? '' : category.replace(/s$/, '');
+        const rc = exploreViaAdk(q);
+        if (rc !== 0) process.exitCode = rc;
         return;
       }
 

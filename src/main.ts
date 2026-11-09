@@ -1115,6 +1115,18 @@ $rows | ForEach-Object { [Console]::Out.WriteLine("PATH=" + $_) }`;
     process.exitCode = runAwconnectCommand(args.slice(1));
     return;
   }
+  // `aither packs <verb> …` and `aither skills <verb> …` -- the same verbs as the
+  // /packs and /skills slash commands, delegated to `adk pack|skills` (adk.addons).
+  if (args[0] && args[0].toLowerCase() === 'packs') {
+    const { runPacksCommand } = await import('./packs-command.js');
+    process.exitCode = runPacksCommand('pack', args.slice(1));
+    return;
+  }
+  if (args[0] && args[0].toLowerCase() === 'skills' && args[1]) {
+    const { runPacksCommand } = await import('./packs-command.js');
+    process.exitCode = runPacksCommand('skills', args.slice(1));
+    return;
+  }
   // `aither wallet [--ledger N] [--json]` -- the Aitherium wallet (gateway /v1/wallet).
   if (args[0] && ['wallet', 'balance'].includes(args[0].toLowerCase())) {
     const { runWalletCommand } = await import('./wallet-command.js');

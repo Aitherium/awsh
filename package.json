@@ -1,7 +1,7 @@
 {
   "name": "@aitherium/awsh",
-  "version": "1.19.8",
-  "description": "awsh - your terminal answers you. Type a question where a command would go, and get an answer instead of \"command not found\".",
+  "version": "2.0.0",
+  "description": "awsh 2.0 — your agent cockpit & terminal with live multi-protocol avatars (Kitty/Sixel/iTerm2/24-bit half-block). Paired with awdk 4.0.",
   "license": "BUSL-1.1",
   "type": "module",
   "repository": {
@@ -17,14 +17,18 @@
     "dist/**/*.js",
     "dist/**/*.d.ts",
     "dist/**/*.js.map",
+    "assets-bundled/**/*.png",
     "commands.json",
     "package.json",
-    "README.md"
+    "README.md",
+    "CHANGELOG.md"
   ],
   "scripts": {
     "dev": "tsx src/main.ts",
     "sync-version": "node scripts/sync-version.mjs",
     "version:check": "node scripts/sync-version.mjs --check",
+    "build:avatars": "node scripts/build-bundled-avatars.mjs",
+    "prepack": "node scripts/build-bundled-avatars.mjs && npm run build",
     "build": "node scripts/sync-version.mjs --check && node scripts/check-spinner-import.mjs && tsc",
     "build:standalone": "bun build --compile src/main.ts --outfile dist/aither-shell",
     "start": "node dist/main.js",

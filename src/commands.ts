@@ -13,7 +13,8 @@ import ora from './spinner.js';
 import type { GenesisClient } from './client.js';
 import type { ShellConfig } from './config.js';
 import { getActiveConfig, DEFAULT_AGENT } from './config.js';
-import { getRemoteMcpClient } from './mcp-client.js';
+import { getRemoteMcpClient, McpHttpClient } from './mcp-client.js';
+import { locateMcpGateway } from './gateway-locate.js';
 import { fleetProbeArgv, fleetRecoverPlan, fleetStateIsUp, parseFleetState } from './fleet-recover.js';
 import { fleetVerbArgs, findFleetVerbsTool, fleetVerbCommand, FleetVerbError, FLEET_VERBS_HELP, type FleetNoun } from './fleet-verbs.js';
 import { getCommandRegistry } from './command-registry.js';
@@ -54,6 +55,7 @@ import {
   deskCommandHistory,
 } from './awdesk-bridge.js';
 import { deskCommands, deskRunCommand, deskUpdateHint } from './awdesk-bridge.js';
+import { fetchAtlasBoard, formatAtlasBoard } from './atlas-board.js';
 import {
   addProject, listProjects, switchProject, removeProject, getActiveWorkspace, pickDirectory,
 } from './workspace.js';
@@ -314,12 +316,36 @@ function parseToolResponse(payload: any): any {
  *   - the chat backend's REST /tools/call (local Genesis).
  * Returns the parsed tool output, or `{ error, status }` on failure.
  */
+/**
+ * The LOCAL AitherOS MCP gateway (127.0.0.1:8182) when no gateway is configured.
+ * Without it every MCP tool fell through to `/tools/call` on the chat backend the
+ * ladder picked -- on the fleet distro the :8099 demo agent, which has none of the
+ * fleet's tools (measured 2026-11-09). Probed once per process; offline never probes.
+ */
+let _localGateway: Promise<McpHttpClient | null> | null = null;
+let _locateGateway: typeof locateMcpGateway = locateMcpGateway;
+
+/** Tests: swap the locator (no network) and forget the memoised answer. */
+export function setGatewayLocatorForTest(fn?: typeof locateMcpGateway): void {
+  _locateGateway = fn ?? locateMcpGateway;
+  _localGateway = null;
+}
+
+function localGatewayClient(): Promise<McpHttpClient | null> {
+  const cfg = getActiveConfig();
+  if (!cfg || cfg.offline) return Promise.resolve(null);
+  _localGateway ??= _locateGateway({}, '', cfg.authToken || '')
+    .then((gw) => (gw ? new McpHttpClient(gw.url, gw.token || null) : null))
+    .catch(() => null);
+  return _localGateway;
+}
+
 export async function invokeMcpTool(
   client: GenesisClient,
   tool: string,
   params: Record<string, any>,
 ): Promise<any> {
-  const remote = getRemoteMcpClient(getActiveConfig());
+  const remote = getRemoteMcpClient(getActiveConfig()) ?? await localGatewayClient();
   if (remote) {
     try {
       const result = await remote.callTool(tool, params);
@@ -753,16 +779,21 @@ const COMMANDS: Record<string, Command> = {
   },
 
   status: {
-    description: 'Show system status',
+    description: 'Fleet, Atlas board and waiting cards, then the Genesis/LLM pool',
     handler: async (client) => {
+      // What the owner acts on first (daily-driver.ts); the Genesis block below
+      // still prints when Genesis answers.
+      const { runStatus } = await import('./daily-driver.js');
+      await runStatus();
       const spinner = ora('Fetching status...').start();
 
       // Fetch pool/queue from MicroScheduler + Genesis status in parallel
-      const msUrls = [process.env.AITHER_LLM_URL, 'https://localhost:8150'].filter(Boolean) as string[];
+      const { spineBaseUrl, spineFetch } = await import('./client.js');
+      const msUrls = [spineBaseUrl()];
       async function fetchMS(path: string): Promise<any> {
         for (const base of msUrls) {
           try {
-            const r = await fetch(`${base}${path}`, { signal: AbortSignal.timeout(3000) });
+            const r = await spineFetch(`${base}${path}`, { signal: AbortSignal.timeout(3000) });
             if (r.ok) return r.json();
           } catch {}
         }
@@ -861,6 +892,47 @@ const COMMANDS: Record<string, Command> = {
     },
   },
 
+  board: {
+    description: "Atlas' issue board: stage, PR and thread per issue",
+    usage: '/board [--counts]',
+    handler: async (client, args) => {
+      const spinner = ora('Fetching Atlas board...').start();
+      const board = await fetchAtlasBoard((tool, params) => invokeMcpTool(client, tool, params));
+      spinner.stop();
+      const full = !/--counts/.test(args || '');
+      console.log();
+      for (const line of formatAtlasBoard(board, { full })) console.log(`  ${line}`);
+      console.log();
+    },
+  },
+
+  find: {
+    description: 'Find something to add: apps, packs, skills, bricks, integrations, stacks, products',
+    usage: '/find [words] [--kind <kind>] [--all]',
+    handler: async (_client: GenesisClient, args: string = '') => {
+      const { runCatalogueCommand, splitArgs } = await import('./packs-command.js');
+      const rc = runCatalogueCommand('find', splitArgs(args));
+      if (rc !== 0) process.exitCode = rc;
+    },
+  },
+  add: {
+    description: 'Add a catalogue entry to this computer (says what it installed and how to undo it)',
+    usage: '/add <id> [--dry-run]',
+    handler: async (_client: GenesisClient, args: string = '') => {
+      const { runCatalogueCommand, splitArgs } = await import('./packs-command.js');
+      const rc = runCatalogueCommand('add', splitArgs(args));
+      if (rc !== 0) process.exitCode = rc;
+    },
+  },
+  remove: {
+    description: 'Undo an add',
+    usage: '/remove <id> [--dry-run]',
+    handler: async (_client: GenesisClient, args: string = '') => {
+      const { runCatalogueCommand, splitArgs } = await import('./packs-command.js');
+      const rc = runCatalogueCommand('remove', splitArgs(args));
+      if (rc !== 0) process.exitCode = rc;
+    },
+  },
   packs: {
     description: 'Find and install add-ons (awpack, Library, awnode ext) via adk',
     usage: '/packs search|install|enable|update|remove|info <id>',
@@ -910,31 +982,24 @@ const COMMANDS: Record<string, Command> = {
     },
   },
   agents: {
-    description: 'List registered agents',
-    handler: async (client) => {
-      const spinner = ora('Fetching agents...').start();
-      const result = await client.getAgents();
-      spinner.stop();
+    // The harness daemon's roster + live agent sessions, not the chat backend's
+    // `/agents` (which on the fleet distro was the :8099 demo agent's "1 agent").
+    description: 'Agent roster + live agent sessions; spawn one (Demiurge, Lyra, Atlas, ...)',
+    usage: '/agents [spawn <name> ["prompt"]]',
+    handler: async (_client, args = '') => {
+      const { runAgents } = await import('./daily-driver.js');
+      const rc = await runAgents(args);
+      if (rc !== 0) process.exitCode = rc;
+    },
+  },
 
-      const agents = result?.agents || [];
-      if (!agents.length) {
-        console.log(chalk.dim('  No agents registered'));
-        return;
-      }
-
-      console.log();
-      const rows = agents.map((a: any) => [
-        chalk.cyan(a.name || a.id || 'unknown'),
-        a.role || a.description || '',
-        a.status === 'online' || a.status === 'active'
-          ? chalk.green('\u25cf ' + (a.status || 'online'))
-          : chalk.dim('\u25cb ' + (a.status || 'offline')),
-      ]);
-      console.log(formatTable(['  Agent', 'Role', 'Status'], rows));
-      console.log();
-      console.log(chalk.dim('  Want more? 43 agents available — /explore agents'));
-      console.log(chalk.dim('  Try premium: @demiurge, @hydra, @athena, @lyra'));
-      console.log();
+  cards: {
+    description: 'Decision cards waiting on you; answer inline',
+    usage: '/cards [answer <n> <option> [note]]',
+    handler: async (_client, args = '') => {
+      const { runCards } = await import('./daily-driver.js');
+      const rc = await runCards(args);
+      if (rc !== 0) process.exitCode = rc;
     },
   },
 
@@ -6347,12 +6412,13 @@ COMMANDS['pool'] = {
   usage: '/pool [status|reset]',
   handler: async (client: GenesisClient, args: string) => {
     const sub = args.trim().toLowerCase() || 'status';
-    const candidates = [process.env.AITHER_LLM_URL, 'https://localhost:8150', 'http://localhost:8150'].filter(Boolean) as string[];
+    const { spineBaseUrl, spineFetch } = await import('./client.js');
+    const candidates = [spineBaseUrl()];
 
     async function fetchPool(path: string, method: string = 'GET'): Promise<any> {
       for (const base of candidates) {
         try {
-          const r = await fetch(`${base}${path}`, {
+          const r = await spineFetch(`${base}${path}`, {
             method,
             signal: AbortSignal.timeout(5000),
           });
@@ -8289,9 +8355,24 @@ COMMANDS['cd'] = {
 
 COMMANDS['workspace'] = {
   description: 'Manage workspaces and project contexts',
-  usage: `/workspace list · /workspace pick · /workspace add <name> <path> · /workspace switch <name> · /workspace remove <name> · /workspace info`,
+  usage: `/workspace use <aitherium|family|…> · /workspace current · /workspace list · /workspace pick · /workspace add <name> <path> · /workspace switch <name> · /workspace remove <name> · /workspace info`,
   handler: async (_client: GenesisClient, args: string, _config: ShellConfig) => {
     const [sub, ...rest] = args.trim().split(/\s+/);
+
+    // The Aitherium WORKSPACE (tenant scope for workspace_* tools, mail, tasks, memory),
+    // as opposed to the project directories below. workspace-context.ts.
+    if (sub === 'use' || sub === 'current' || sub === 'scope') {
+      const wc = await import('./workspace-context.js');
+      if (sub === 'use') {
+        const label = wc.setActiveWorkspace(rest.join(' '));
+        if (!label) { console.log(chalk.yellow('  Usage: /workspace use <label>  (e.g. aitherium, family)')); return; }
+        console.log(chalk.green(`  workspace → ${label}`) + chalk.dim('  — every turn and workspace_* tool call is scoped to it'));
+        return;
+      }
+      const cur = wc.activeWorkspaceLabel();
+      console.log(cur ? chalk.cyan(`  workspace: ${cur}`) : chalk.dim('  no workspace — /workspace use <label>'));
+      return;
+    }
 
     if (!sub || sub === 'list') {
       listProjects();

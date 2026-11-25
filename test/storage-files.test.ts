@@ -153,12 +153,12 @@ test('share: POSTs only {node,path[,seal]} and reports the proposal, never an ap
 
 test('share: missing --node uses awstorage whoami (env first), never a bare guess', async () => {
   const prev = process.env.AWSTORAGE_NODE;
-  process.env.AWSTORAGE_NODE = 'debian-fleet';
+  process.env.AWSTORAGE_NODE = 'awnix';
   try {
     const { client, calls } = fakeClient(() => ({ proposal_id: 'p-2' }));
     const { result, out } = await quiet(() => runStorageCommand(['share', 'E:/docs'], client));
     assert.equal(result, 0);
-    assert.deepEqual(calls[0].body, { node: 'debian-fleet', path: 'E:/docs' });
+    assert.deepEqual(calls[0].body, { node: 'awnix', path: 'E:/docs' });
     assert.match(out, /env:AWSTORAGE_NODE/);
   } finally {
     if (prev === undefined) delete process.env.AWSTORAGE_NODE;

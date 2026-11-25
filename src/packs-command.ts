@@ -167,6 +167,62 @@ export function exploreViaAdk(query: string, deps: PacksDeps = {}): number {
   return 0;
 }
 
+// ── aither find | add | remove — the one catalogue, the same three verbs everywhere ──
+
+export const CATALOGUE_VERBS = ['find', 'add', 'remove'] as const;
+export type CatalogueVerb = typeof CATALOGUE_VERBS[number];
+
+/**
+ * The exact argv for `python`: `-m adk.cli catalog find|add|remove …`.
+ * awdk (adk.catalog_person) owns the rows, the five-row cap, the steps and the undo
+ * record, so this door, the desk, the web and the MCP tool give the same answer.
+ * null = `add`/`remove` with no id (refused here, never forwarded).
+ */
+export function buildCatalogueArgv(verb: CatalogueVerb, args: string[]): string[] | null {
+  if (verb !== 'find' && !args.find((a) => !a.startsWith('-'))) return null;
+  return ['-m', 'adk.cli', 'catalog', verb, ...args];
+}
+
+export function catalogueUsage(): string {
+  return [
+    'Next: aither find <words>   — search apps, packs, skills, bricks, integrations, stacks and products',
+    '',
+    '  aither find [words] [--kind brick|app|pack|skill|plugin|integration|stack|product] [--all]',
+    '  aither add <id> [--dry-run]       install it; says what it installed, how to see it, how to undo it',
+    '  aither remove <id> [--dry-run]    undo an add',
+    '',
+    '  In the REPL: /find, /add, /remove',
+  ].join('\n');
+}
+
+export function runCatalogueCommand(verb: CatalogueVerb, args: string[], deps: PacksDeps = {}): number {
+  const env = deps.env || process.env;
+  const log = deps.log || ((line: string) => console.log(line));
+  if (args[0] && ['-h', '--help', 'help'].includes(args[0])) {
+    log(catalogueUsage());
+    return 0;
+  }
+  const argv = buildCatalogueArgv(verb, args);
+  if (!argv) {
+    log(`aither ${verb} needs a name — find one first:`);
+    log(catalogueUsage());
+    return 2;
+  }
+  const ready = deps.adkReady || (() => {
+    const r = spawnSync(pythonExecutable(env), ['-c', 'import adk.catalog_person'], {
+      stdio: 'ignore', env, timeout: 30_000, windowsHide: true,
+    });
+    return !r.error && r.status === 0;
+  });
+  if (!ready()) {
+    log('This awdk is older than the catalogue (adk.catalog_person). Upgrade it:');
+    log('  pip install -U awdk');
+    return 3;
+  }
+  const status = (deps.runPython || defaultRunPython(env))(argv);
+  return status === null ? 3 : status;
+}
+
 /** Split a slash-command tail on whitespace, keeping "double quoted" words whole. */
 export function splitArgs(args: string): string[] {
   const out: string[] = [];

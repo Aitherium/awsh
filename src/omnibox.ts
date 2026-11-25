@@ -336,13 +336,67 @@ ${fn}() {
 
 /**
  * The model a practical decision is routed to, and the one used when the caller
- * cannot reach it. Measured 2026-10-03 on the car-wash prompts: DeepSeek V4 Flash
- * over the API 4/4 in ~2 s; the gateway's local reasoning route right but 5-60 s.
- * aither-deepseek is a PLATFORM-tier gateway route, so customers get a 403 and
- * fall back to the pool.
+ * cannot reach it. Both are LOCAL: aither-deliberate is Bonsai-2 27B on the 5090
+ * through the spine (measured 2026-10-04 on held-out practical questions: 5/6 and
+ * 8/10), the reasoning lane is DeepSeek-V4 served on the DGX pool. Until 2026-11-12
+ * this was aither-deepseek, the paid DeepSeek API, which now answers 402 Payment
+ * Required: every decision question failed over to the pool after a wasted round trip.
  */
-export const DELIBERATE_MODEL = 'aither-deepseek';
+export const DELIBERATE_MODEL = 'aither-deliberate';
 export const DELIBERATE_FALLBACK = 'aither-reasoning';
+
+/** The spine's /llm/queue/detail, as far as the progress line reads it. */
+export interface SpineQueueDetail {
+  queued?: Array<{ source?: string | null; model?: string | null; age_s?: number | null }>;
+  inflight?: Array<{ source?: string | null; model?: string | null; lane?: string | null;
+    age_s?: number | null; done?: boolean }>;
+}
+
+/**
+ * One line saying where THIS shell's turn is on the spine, or null when there is
+ * nothing worth saying. "Mine" = the shell's source (desk:awsh) or its model.
+ *
+ *   queued on llamacpp_local (2 of 3)    -- waiting; 2nd oldest of 3 queued
+ *   running on llamacpp_local (3 in flight)
+ *   spine busy (4 queued, 3 running)     -- cannot tell which request is ours
+ *
+ * Why: a turn queued behind a full Bonsai lane sat silent for up to 120 s and then
+ * expired (2026-11-11, 'lane llamacpp_local is full (3 of 3)'); the person could not
+ * tell a slow model from a stuck queue. Pure, so the test pins the wording.
+ */
+export function formatLaneProgress(detail: SpineQueueDetail | null | undefined,
+  mine: { source?: string; model?: string }): string | null {
+  if (!detail || typeof detail !== 'object') return null;
+  const queued = Array.isArray(detail.queued) ? detail.queued : [];
+  const inflight = (Array.isArray(detail.inflight) ? detail.inflight : []).filter((t) => t && !t.done);
+  // The source names THIS shell; the model only when nothing on the spine carries the
+  // source (a backend that does not forward it), since other callers share model names.
+  const bySource = !!mine.source &&
+    [...queued, ...inflight].some((t) => t && t.source === mine.source);
+  const isMine = (t: { source?: string | null; model?: string | null }) =>
+    !!t && (bySource ? t.source === mine.source : (!!mine.model && t.model === mine.model));
+  const laneOf = (): string => {
+    const own = inflight.find(isMine)?.lane;
+    if (own) return own;
+    const counts = new Map<string, number>();
+    for (const t of inflight) if (t.lane) counts.set(t.lane, (counts.get(t.lane) || 0) + 1);
+    let best = '';
+    for (const [lane, n] of counts) if (n > (counts.get(best) || 0)) best = lane;
+    return best || 'the spine';
+  };
+  // Oldest first: the queue serves the longest waiter of a priority first.
+  const byAge = [...queued].sort((a, b) => (b?.age_s ?? 0) - (a?.age_s ?? 0));
+  const pos = byAge.findIndex(isMine);
+  if (pos >= 0) return `queued on ${laneOf()} (${pos + 1} of ${byAge.length})`;
+  const running = inflight.find(isMine);
+  if (running) {
+    const lane = running.lane || laneOf();
+    const onLane = inflight.filter((t) => t.lane === lane).length || 1;
+    return `running on ${lane} (${onLane} in flight)`;
+  }
+  if (queued.length) return `spine busy (${queued.length} queued, ${inflight.length} running)`;
+  return null;
+}
 
 /**
  * The omnibox framing for a decision. The shell framing ("typed at a shell prompt

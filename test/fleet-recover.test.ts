@@ -43,10 +43,10 @@ describe('fleet distro resolution', () => {
   });
 
   test('nodes.yaml line scan matches the Python resolver', () => {
-    const y = 'nodes:\n  debian-fleet:\n    host: x\n    fleet_distro: "awnix" # c\n  other:\n    fleet_distro: nope\n';
+    const y = 'nodes:\n  awnix:\n    host: x\n    fleet_distro: "awnix" # c\n  other:\n    fleet_distro: nope\n';
     assert.equal(readNodesFleetDistro(y), 'awnix');
-    assert.equal(readNodesFleetDistro('nodes:\n  debian-fleet:\n    host: x\n  other:\n    fleet_distro: nope\n'), null);
-    assert.equal(readNodesFleetDistro('nodes:\n  debian-fleet:\n    fleet_distro: bad name\n'), null);
+    assert.equal(readNodesFleetDistro('nodes:\n  awnix:\n    host: x\n  other:\n    fleet_distro: nope\n'), null);
+    assert.equal(readNodesFleetDistro('nodes:\n  awnix:\n    fleet_distro: bad name\n'), null);
   });
 
   test('default is awnix, never Debian', () => {

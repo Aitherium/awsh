@@ -27,6 +27,7 @@ import { isRelayOneShot } from './relay-command.js';
 import { createStreamRenderer, SteeringBar, type SessionProfile } from './renderer.js';
 import { stripFenceDelimiters } from './tui/chat-formatter.js';
 import { promptLabel } from './prompt-state.js';
+import { colorEnabled, fairyTag } from './agent-fairy.js';
 import { getCommand, getCommandNames } from './commands.js';
 import { resolveFallback, runFallback, formatFallbackOutput } from './command-fallback.js';
 import { getCommandRegistry } from './command-registry.js';
@@ -183,6 +184,8 @@ export async function startRepl(client: GenesisClient, config: ShellConfig): Pro
 
   /** GPU status tag — updated by background poller. */
   let gpuTag = '';
+  /** Truecolor the fairy only where it lands: a TTY, NO_COLOR unset, TERM not dumb. */
+  const promptColor = colorEnabled(process.stdout);
 
   const rl = readline.createInterface({
     input: process.stdin,
@@ -336,6 +339,9 @@ export async function startRepl(client: GenesisClient, config: ShellConfig): Pro
    *  strip state the same facts: `awsh[3?] >` is the one line the eye returns to
    *  before typing, and it is the cheapest place to say what is waiting (law 3). */
   function buildPrompt(): string {
+    // The fairy of the agent a plain line goes to, in its palette colour
+    // (agent-fairy.ts; bare text under NO_COLOR or off a TTY).
+    const fairy = fairyTag(config.defaultAgent || 'aither', { color: promptColor });
     const running = runningCount();
     const parts: string[] = [];
     const label = promptLabel();
@@ -345,7 +351,7 @@ export async function startRepl(client: GenesisClient, config: ShellConfig): Pro
     const suffix = parts.length > 0
       ? chalk.dim(`[${parts.join('|')}]`)
       : '';
-    return chalk.green('awsh') + suffix + chalk.green('> ');
+    return fairy + ' ' + chalk.green('awsh') + suffix + chalk.green('> ');
   }
 
   /** Update the prompt to reflect current job count / GPU state. */
@@ -1308,6 +1314,9 @@ export async function startRepl(client: GenesisClient, config: ShellConfig): Pro
       // Blank readline's prompt so it can't leave a duplicate behind the bar.
       if (process.stdin.isTTY) rl.setPrompt('');
     }
+    // A turn routed to another agent (@lyra ...) says who is answering, in that
+    // agent's fairy colour; the prompt already wears the default agent's fairy.
+    if (agent && agent !== config.defaultAgent) console.log('  ' + fairyTag(agent, { color: promptColor }));
     const renderer = createStreamRenderer(config.sessionId, message, _useSteerBar ? steeringBar : undefined);
     // Indication starts HERE, not on the first SSE event -- everything below
     // (context build, health check, the POST, and the backend's own

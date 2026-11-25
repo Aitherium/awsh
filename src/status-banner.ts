@@ -13,7 +13,7 @@
  * connect banner and the TUI share one implementation.
  */
 
-import { spawnSync } from 'node:child_process';
+import { containerPs, type SpawnLike } from './fleet-health.js';
 import chalk, { Chalk } from 'chalk';
 import type { GenesisClient } from './client.js';
 import type { ShellConfig } from './config.js';
@@ -140,7 +140,7 @@ export function parseDockerPs(text: string): Map<string, DiscoveredService> {
     const health: DiscoveredService['health'] =
       /\(healthy\)/.test(status) ? 'healthy'
       : /\(unhealthy\)/.test(status) ? 'unhealthy'
-      : /\(health: starting\)/.test(status) ? 'starting'
+      : /\((?:health: )?starting\)/.test(status) ? 'starting'   // docker | podman
       : undefined;
     // `0.0.0.0:8490->8090/tcp`, `127.0.0.1:8490->8090/tcp` and bare `8490->8090/tcp`.
     const published = ports.match(/(?:^|[\s,])(?:[\d.:\[\]a-f]*:)?(\d+)->\d+\/tcp/i);
@@ -161,13 +161,12 @@ export function parseDockerPs(text: string): Map<string, DiscoveredService> {
  * to static ports, whereas "docker answered and listed nothing" really does mean no fleet.
  * Collapsing the two would blank the banner on any host without docker.
  */
-export function discoverLocalServices(): Map<string, DiscoveredService> | null {
-  try {
-    const r = spawnSync('docker', ['ps', '-a', '--format', '{{.Names}}\t{{.Status}}\t{{.Ports}}'],
-      { encoding: 'utf-8', timeout: 3000, windowsHide: true });
-    if (r.status !== 0 || typeof r.stdout !== 'string') return null;
-    return parseDockerPs(r.stdout);
-  } catch { return null; }
+export function discoverLocalServices(spawn?: SpawnLike): Map<string, DiscoveredService> | null {
+  // docker, then podman (fleet-health.ts): the awnix fleet is rootful podman and has no
+  // docker at all, which is what made this return null there and the banner say
+  // `10 down` over a fleet with nothing down (measured 2026-11-09).
+  const ps = containerPs(spawn);
+  return ps ? parseDockerPs(ps.text) : null;
 }
 
 /** The local fleet probe set: which container backs each row, and on what scheme. */
@@ -190,6 +189,14 @@ const LOCAL_PROBES: {
   // A HOST process, not a container — docker knows nothing about it, so never gate it.
   { name: 'MediaForge',     hostProcess: true,                     port: '8200', scheme: 'http', path: '/' },
 ];
+
+/** The MCP gateway's health lives at its ROOT, not under the /mcp protocol path:
+ *  https://mcp.aitherium.com/mcp/health is 401 (auth on the data plane) while
+ *  /health is 200. Probing the former painted "1 down - run /doctor: MCP" on every
+ *  owner launch (2026-11-16) for a gateway that was up. Pure. */
+export function mcpHealthUrl(mcpUrl: string): string {
+  return `${mcpUrl.replace(/\/+$/, '').replace(/\/mcp$/i, '')}/health`;
+}
 
 /**
  * Build the health-probe set from the configured endpoints.
@@ -215,7 +222,7 @@ export function buildProbes(
       { name: 'Gateway',  url: `${strip(config.genesisUrl)}/health` },
       { name: 'Identity', url: `${strip(config.identityUrl)}/health` },
     ];
-    if (config.mcpUrl) probes.push({ name: 'MCP', url: `${strip(config.mcpUrl)}/health` });
+    if (config.mcpUrl) probes.push({ name: 'MCP', url: mcpHealthUrl(config.mcpUrl) });
     const msUrl = process.env.AITHER_LLM_URL;
     if (msUrl) probes.push({ name: 'MicroScheduler', url: `${strip(msUrl)}/health` });
     return probes;

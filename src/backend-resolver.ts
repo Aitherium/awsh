@@ -10,7 +10,9 @@
  * AITHERSHELL_USE_ADK != '0'):
  *   1. ADK daemon (sovereign local agent)   (127.0.0.1:9001) — local-first, stateless
  *   2. Local Genesis / standalone node      (127.0.0.1:8001) — full stack, free, private
- *   3. Cloud gateway                        (mcp.aitherium.com) — always-on fallback
+ *   3. Local model server (raw /v1)         llm_url if loopback, then MicroScheduler
+ *                                           (https://127.0.0.1:8150/v1) — free, private
+ *   4. Cloud gateway                        (mcp.aitherium.com) — always-on fallback
  *
  * An explicitly pinned endpoint (AITHER_API_URL / config file / --gateway) is
  * honored verbatim — we probe it for the banner but never override the user's
@@ -24,6 +26,7 @@ import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { CLOUD_URL, applyCloudFallback, noteLocalDaemonBooting, type ShellConfig } from './config.js';
 import { probeHealth } from './status-banner.js';
+import { SPINE_URL, isSpineUrl, normalizeSpineUrl, spineFetch } from './client.js';
 
 /** How long the resolver waits for a daemon IT just launched, and how often it looks.
  *  Pure, so the test can pin it. Measured 2026-09-19: a cold daemon binds in ~13 s
@@ -79,12 +82,61 @@ const AWSH_AGENT_UNIT = '/usr/lib/systemd/user/awsh-agent.service';
 /** Does an OpenAI-compatible server at `llmUrl` (…/v1) list at least one model? */
 export async function probeModels(llmUrl: string, timeoutMs = 2500): Promise<string | null> {
   try {
-    const r = await fetch(`${strip(llmUrl)}/models`, { signal: AbortSignal.timeout(timeoutMs) });
+    // The spine is dialled verified against the AitherNet CA (client.ts spineFetch); a
+    // bare fetch() only reached it while main.ts had relaxed TLS for loopback.
+    const url = `${strip(llmUrl)}/models`;
+    const init = { signal: AbortSignal.timeout(timeoutMs) };
+    const r = await (isSpineUrl(url) ? spineFetch(url, init) : fetch(url, init));
     if (!r.ok) return null;
     const body = await r.json() as { data?: { id?: string }[] };
     const id = Array.isArray(body?.data) && body.data.length > 0 ? body.data[0]?.id : undefined;
     return id ? String(id) : null;
   } catch { return null; }
+}
+
+/** MicroScheduler's well-known loopback address: every AitherOS model call routes
+ *  through it, and on a fleet host (awnix) it is the healthy local lane. https; its
+ *  certificate chains to the AitherNet CA, which spineFetch (client.ts) verifies per
+ *  request. Nothing here relaxes TLS for it. */
+export const LOCAL_MICROSCHEDULER_URL = `${SPINE_URL}/v1`;
+
+/** Loopback model servers worth one probe before the cloud rung, best first and without
+ *  duplicates: the configured llm_url (only if loopback), then MicroScheduler. Pure.
+ *  A configured spine in a dead spelling (http://localhost:8150/v1) becomes
+ *  https://127.0.0.1:8150/v1: plain http hangs the TLS listener and localhost reaches
+ *  ::1, which the spine refuses.
+ *  AITHERSHELL_LOCAL_LLM=0 drops the MicroScheduler guess (the configured url stays). */
+export function localModelCandidates(llmUrl: string | undefined, env: NodeJS.ProcessEnv = process.env): string[] {
+  const out: string[] = [];
+  const add = (u: string | undefined): void => {
+    const s = strip(normalizeSpineUrl(strip((u || '').trim()), env));
+    if (s && isLoopbackUrl(s) && !out.includes(s)) out.push(s);
+  };
+  add(llmUrl);
+  if ((env.AITHERSHELL_LOCAL_LLM || '').trim() !== '0') add(LOCAL_MICROSCHEDULER_URL);
+  return out;
+}
+
+/** Try each local model server; on the first that lists a model, move `config` onto
+ *  raw inference against it. `setModel` adopts the listed id when none is configured
+ *  (offline: the box's own server is the only authority on names); online, MicroScheduler
+ *  routes the shell's default agent name itself, so the configured default stands. */
+export async function tryLocalModelServer(
+  config: ShellConfig,
+  opts: { setModel: boolean; probe?: (llmUrl: string) => Promise<string | null> },
+): Promise<ResolvedBackend | null> {
+  const probe = opts.probe ?? ((u: string) => probeModels(u));
+  for (const llm of localModelCandidates(config.llmUrl, process.env)) {
+    const model = await probe(llm);
+    if (!model) continue;
+    config.llmUrl = llm;
+    config.inferenceMode = 'raw';
+    config.backendType = 'adk';
+    config.backendName = 'local model';
+    if (opts.setModel && !config.model) config.model = model;
+    return { chosen: 'local-llm', url: llm, switched: false, reachable: true };
+  }
+  return null;
 }
 
 /** Does this URL name a process on THIS box? config.ts keeps a private copy of this; a pin
@@ -200,6 +252,70 @@ function tryStartAdkDaemon(): boolean {
   } catch { return false; /* best-effort only */ }
 }
 
+export interface DaemonProbe { url: string; up: boolean; tools: boolean }
+
+/** Pick the daemon to talk to: the first healthy one whose platform tool lane is up
+ *  (`gateway_mcp_connected`), else the first healthy one, else null. Pure.
+ *  Measured 2026-11-16: ~/.aither/daemon.json had been overwritten by a second
+ *  `adk.server --port 9177` with gateway_mcp_connected:false, while the watchdog's :9001
+ *  had it true -- trusting the file first sent every turn to the daemon WITHOUT mail,
+ *  fleet or Discord tools ("Unknown tool: fleet_status"). */
+export function pickDaemon(rows: readonly DaemonProbe[]): string | null {
+  return rows.find((r) => r.up && r.tools)?.url ?? rows.find((r) => r.up)?.url ?? null;
+}
+
+async function probeDaemon(url: string): Promise<DaemonProbe> {
+  try {
+    const r = await fetch(`${strip(url)}/health`, { signal: AbortSignal.timeout(2500) });
+    if (!r.ok) return { url, up: false, tools: false };
+    const b = await r.json().catch(() => ({})) as Record<string, unknown>;
+    return { url, up: true, tools: b.gateway_mcp_connected === true };
+  } catch {
+    return { url, up: await probeHealth(`${strip(url)}/health`, 2500), tools: false };
+  }
+}
+
+async function bestDaemon(candidates: readonly string[]): Promise<string | null> {
+  return pickDaemon(await Promise.all(candidates.map(probeDaemon)));
+}
+
+/** The healthiest local agent daemon, or null. client.ts calls this (via a dynamic
+ *  import, the two modules import each other) when a REMOTE endpoint dies mid-turn. */
+export async function findLocalAgentDaemon(): Promise<string | null> {
+  return bestDaemon(adkDaemonCandidates());
+}
+
+/** Does a /health body describe the bare edge gateway (OpenAI /v1 only, no agent
+ *  pipeline)? Same test client.ts detectBackend uses to pick the toolless path. Pure. */
+export function isBareGatewayHealth(body: unknown): boolean {
+  if (!body || typeof body !== 'object') return false;
+  const b = body as Record<string, unknown>;
+  if (b.agent !== undefined || b.llm_backend !== undefined) return false;
+  if (b.generation_ready !== undefined || b.tracked_services !== undefined || b.service === 'AitherGenesis') return false;
+  return typeof b.service === 'string' && /gateway/i.test(b.service);
+}
+
+/** May a remote pin be traded for the local agent daemon? Not when the user asked for a
+ *  thin client (inference_mode raw / --gateway), disabled the daemon, or said keep it. Pure. */
+export function shouldPreferLocalAgent(
+  config: Pick<ShellConfig, 'inferenceMode' | 'offline'>, env: NodeJS.ProcessEnv,
+): boolean {
+  if ((env.AWSH_HONOR_REMOTE_PIN || '').trim() === '1') return false;
+  if (env.AITHERSHELL_USE_ADK === '0') return false;
+  if (config.inferenceMode === 'raw') return false;
+  return true;
+}
+
+async function isBareGateway(url: string): Promise<boolean> {
+  try {
+    const r = await fetch(`${strip(url)}/health`, {
+      headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(3000),
+    });
+    if (!r.ok) return false;
+    return isBareGatewayHealth(await r.json());
+  } catch { return false; }
+}
+
 /**
  * Resolve the best reachable backend and mutate `config` in place.
  *
@@ -236,6 +352,49 @@ export async function resolveBackend(config: ShellConfig): Promise<ResolvedBacke
   }
   if (config.endpointPinned) {
     const reachable = await probeHealth(`${strip(config.genesisUrl)}/health`, 3000);
+    // A REMOTE pin that is only the bare edge gateway (OpenAI /v1, no persona, no tools,
+    // no memory) does not outrank a healthy LOCAL agent daemon. Measured 2026-11-16 on the
+    // owner's desktop: a User-scope AITHER_API_URL=https://mcp.aitherium.com pinned every
+    // turn to the toolless /v1 path, so aither-orchestrator told him to "run docker ps",
+    // did not know DarkMatter and said it had no Discord -- while :9001 sat healthy with
+    // 68 platform tools attached. The switch is said out loud; AWSH_HONOR_REMOTE_PIN=1 or
+    // inference_mode: raw keeps the edge (a deliberate thin client).
+    if (reachable && !isLoopbackUrl(config.genesisUrl)
+        && shouldPreferLocalAgent(config, process.env)
+        && await isBareGateway(config.genesisUrl)) {
+      const candidate = await bestDaemon(adkDaemonCandidates());
+      if (candidate) {
+        {
+          process.stderr.write(
+            `  ! pinned ${config.genesisUrl} is the bare edge gateway (no tools, no memory);
+` +
+            `    using the local agent daemon ${candidate} instead (AWSH_HONOR_REMOTE_PIN=1 keeps the pin)
+`,
+          );
+          config.endpointPinned = false;
+          config.genesisUrl = candidate;
+          return { chosen: 'adk', url: candidate, switched: true, reachable: true };
+        }
+      }
+    }
+    // A DEAD remote pin with a healthy local agent daemon: the internet is gone, not the
+    // user's choice. Measured 2026-11-17: the desktop NIC came up without DHCP after a crash
+    // reboot, api_url pinned https://mcp.aitherium.com, and every turn died "fetch failed"
+    // while :9001 sat healthy. Same gate as the bare-gateway trade above; said out loud.
+    if (!reachable && !isLoopbackUrl(config.genesisUrl)
+        && shouldPreferLocalAgent(config, process.env)) {
+      const candidate = await bestDaemon(adkDaemonCandidates());
+      if (candidate) {
+        process.stderr.write(
+          `  ! pinned ${config.genesisUrl} is unreachable (network down?);\n` +
+          `    using the local agent daemon ${candidate} instead (AWSH_HONOR_REMOTE_PIN=1 keeps the pin)\n`,
+        );
+        config.endpointPinned = false;
+        config.genesisUrl = candidate;
+        if (config.llmUrl && !isLoopbackUrl(config.llmUrl)) config.llmUrl = '';
+        return { chosen: 'adk', url: candidate, switched: true, reachable: true };
+      }
+    }
     if (reachable || !isLoopbackUrl(config.genesisUrl)) {
       return { chosen: 'pinned', url: config.genesisUrl, switched: false, reachable };
     }
@@ -253,8 +412,10 @@ export async function resolveBackend(config: ShellConfig): Promise<ResolvedBacke
   const useAdk = process.env.AITHERSHELL_USE_ADK !== '0';
   if (useAdk) {
     const candidates = adkDaemonCandidates();
-    for (const candidate of candidates) {
-      if (await probeHealth(`${strip(candidate)}/health`, 2500)) {
+    const best = await bestDaemon(candidates);
+    if (best) {
+      const candidate = best;
+      {
         // Move the CONFIG onto the rung we chose, not just the return value. Measured
         // 2026-09-10: this rung reported the daemon it found and left config.genesisUrl
         // pointing at the endpoint it had just rejected, so the client dialed the dead
@@ -313,17 +474,8 @@ export async function resolveBackend(config: ShellConfig): Promise<ResolvedBacke
   //    own model server (raw /v1 inference, no agent loop); then say plainly that
   //    nothing local answered. An air-gapped box never dials a public edge.
   if (config.offline) {
-    const llm = strip(config.llmUrl || '');
-    if (llm && isLoopbackUrl(llm)) {
-      const model = await probeModels(llm);
-      if (model) {
-        config.inferenceMode = 'raw';
-        config.backendType = 'adk';
-        config.backendName = 'local model';
-        if (!config.model) config.model = model;
-        return { chosen: 'local-llm', url: llm, switched: false, reachable: true };
-      }
-    }
+    const local = await tryLocalModelServer(config, { setModel: true });
+    if (local) return local;
     applyCloudFallback(config, CLOUD_URL); // records the refusal; changes nothing else
     process.stderr.write(
       '  ! offline: no local backend answered (agent :9001, genesis, model server). ' +
@@ -333,7 +485,14 @@ export async function resolveBackend(config: ShellConfig): Promise<ResolvedBacke
     return { chosen: 'offline', url: config.genesisUrl, switched: false, reachable: false };
   }
 
-  // 5. Local is down → fail over to the cloud gateway.
+  // 5. Online, a healthy local model server still beats the cloud. Measured 2026-11-09
+  //    on an awnix fleet host: no agent daemon, no published Genesis, MicroScheduler
+  //    healthy on :8150 -- and awsh picked the cloud gateway, then refused every turn with
+  //    "Cloud gateway requires sign-in". Local, free and already authorised wins.
+  const local = await tryLocalModelServer(config, { setModel: false });
+  if (local) return local;
+
+  // 6. Local is down → fail over to the cloud gateway.
   applyCloudFallback(config, CLOUD_URL);
   const reachable = await probeHealth(`${strip(CLOUD_URL)}/health`, 4000);
   return { chosen: 'cloud', url: CLOUD_URL, switched: true, reachable };

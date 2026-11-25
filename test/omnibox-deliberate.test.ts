@@ -33,9 +33,9 @@ describe('isDeliberateQuestion', () => {
     test(`stays fast: ${line}`, () => assert.equal(isDeliberateQuestion(line), false));
   }
 
-  test('routes to DeepSeek V4 Flash (4/4 in ~2 s), falls back to the local pool', () => {
-    assert.equal(DELIBERATE_MODEL, 'aither-deepseek');
-    assert.equal(DELIBERATE_FALLBACK, 'aither-reasoning');
+  test('routes to Bonsai on the 5090 (local), falls back to the local DGX pool', () => {
+    assert.equal(DELIBERATE_MODEL, 'aither-deliberate');
+    assert.match(DELIBERATE_FALLBACK, /^aither-reason/);
   });
 });
 

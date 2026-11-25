@@ -31,6 +31,7 @@ import chalk from 'chalk';
 // cannot see it.
 import './wide-chars.js';
 import { fitSegments, fitText } from './status-bar-fit.js';
+import { clearKittyImage, type GraphicsProtocol } from './terminal-graphics.js';
 
 const nodeRequire = createRequire(import.meta.url);
 const blessed: any = nodeRequire('neo-blessed');
@@ -39,16 +40,46 @@ const blessed: any = nodeRequire('neo-blessed');
 export const TRACE_LEFT_FRACTION = 0.6;
 /** Minimum columns the trace pane keeps when an avatar is docked beside it. */
 export const MIN_TRACE_COLS = 28;
+/** Minimum columns the output pane keeps when trace is hidden and an avatar is docked. */
+export const MIN_OUTPUT_COLS = 52;
+/** 1-based terminal row where the docked avatar starts (row 1 is the top statusBar). */
+export const AVATAR_TOP_ROW = 2;
 
 export interface AvatarLayout {
   /** Columns the avatar may occupy (clamped). */
   avatarCols: number;
-  /** Value for the trace box's `right` offset, so it stops before the avatar. */
+  /** Value for the rightmost pane's `right` offset, so it stops before the avatar. */
   traceRight: number;
   /** 1-based terminal column the avatar starts painting at (matches paintAvatar). */
   avatarStartCol: number;
   /** Columns the trace pane is left with. */
   traceCols: number;
+}
+
+/**
+ * Avatar layout when the trace pane is hidden (boot state): output owns the screen
+ * and yields `traceRight` columns on its right edge so the docked avatar NEVER
+ * overpaints chat text or the top status bar. Pure.
+ */
+export function avatarLayoutWhenTraceHidden(
+  screenCols: number,
+  requestedAvatarCols: number,
+  minOutputCols: number = MIN_OUTPUT_COLS,
+): AvatarLayout {
+  const cols = Math.max(1, Math.floor(screenCols) || 1);
+  const room = Math.max(0, cols - minOutputCols - 1);
+  const maxAllowed = Math.min(room, Math.floor(cols * 0.32));
+  const avatarCols = Math.max(0, Math.min(Math.floor(requestedAvatarCols), maxAllowed));
+  if (avatarCols <= 0) {
+    return { avatarCols: 0, traceRight: 0, avatarStartCol: cols, traceCols: cols };
+  }
+  const traceRight = avatarCols + 1;
+  return {
+    avatarCols,
+    traceRight,
+    avatarStartCol: Math.max(1, cols - avatarCols),
+    traceCols: cols - traceRight,
+  };
 }
 
 /**
@@ -163,10 +194,18 @@ export interface TuiSurface {
   /** Animate portrait frames on the RAW terminal (bypasses blessed, which
    *  downsamples 24-bit truecolor to its 16/256 palette). Any key closes. */
   showPortraitFrames(frames: string[][], intervalMs?: number): Promise<void>;
-  /** Toggle a PERSISTENT truecolor avatar pane painted raw in the top-right corner
-   *  (opt-in; repaints after each blessed render + on a frame timer). Pass frames to
-   *  enable, null/[] to disable. Returns the new on/off state. Never throws. */
-  setAvatarPane(frames: string[][] | null, opts?: { isSpeaking?: () => boolean; talkFrames?: string[][] }): boolean;
+  /** Toggle a PERSISTENT avatar pane painted in the top-right corner (starting below the
+   *  top status bar, never overlapping output or trace). Supports native Kitty/Sixel/iTerm2
+   *  pixel graphics alongside 24-bit half-block fallback, plus a live caption line. */
+  setAvatarPane(frames: string[][] | null, opts?: {
+    isSpeaking?: () => boolean;
+    talkFrames?: string[][];
+    nativeFrames?: (string | null)[];
+    talkNativeFrames?: (string | null)[];
+    protocol?: GraphicsProtocol;
+    imageId?: number;
+    caption?: () => string;
+  }): boolean;
   /** Widest avatar (in columns) that can be docked without squeezing the trace pane
    *  below a readable width. Render frames at MOST this wide — the avatar is painted raw
    *  over the terminal, so anything wider silently overwrites trace content. */
@@ -581,10 +620,30 @@ export function createTuiScreen(opts: TuiScreenOpts): TuiSurface {
   // user's own Ctrl+T choice always wins after that (userPinnedTrace).
   let traceVisible = false;
   let splitPct = 60;  // OUTPUT pane width %; the rest is the trace pane.
+  let reservedAvatarCols: number | null = null;
   trace.hide();
   output.width = '100%';
   function applySplit(): void {
-    if (traceVisible) { output.width = `${splitPct}%`; trace.left = `${splitPct}%`; }
+    const screenCols = Number((screen as any).width) || process.stdout.columns || 100;
+    if (traceVisible) {
+      output.position.right = undefined;
+      output.width = `${splitPct}%`;
+      trace.left = `${splitPct}%`;
+      trace.position.right = reservedAvatarCols == null
+        ? 0
+        : avatarLayout(screenCols, reservedAvatarCols).traceRight;
+    } else {
+      const right = reservedAvatarCols == null
+        ? 0
+        : avatarLayoutWhenTraceHidden(screenCols, reservedAvatarCols).traceRight;
+      if (right > 0) {
+        output.position.width = undefined;
+        output.position.right = right;
+      } else {
+        output.position.right = undefined;
+        output.width = '100%';
+      }
+    }
   }
   /** Reveal the split the moment there IS trace content worth the screen space —
    *  unless the user explicitly hid it with Ctrl+T. */
@@ -599,7 +658,7 @@ export function createTuiScreen(opts: TuiScreenOpts): TuiSurface {
     traceVisible = !traceVisible;
     userPinnedTrace = true;   // an explicit choice — auto-reveal must not fight it
     if (traceVisible) { trace.show(); applySplit(); }
-    else { trace.hide(); output.width = '100%'; }
+    else { trace.hide(); applySplit(); }
     screen.render();
   }
   // Mouse capture vs terminal text selection. While blessed owns the mouse (the
@@ -801,12 +860,20 @@ export function createTuiScreen(opts: TuiScreenOpts): TuiSurface {
   function focusInput(): void { renderInput(); }
   function destroy(): void {
     if (renderTimer) { clearTimeout(renderTimer); renderTimer = null; }
+    if (avatarTimer) { clearInterval(avatarTimer); avatarTimer = null; }
+    if (avatarProtocol === 'kitty' && avatarImageId) {
+      try { process.stdout.write(clearKittyImage(avatarImageId)); } catch { /* */ }
+    }
+    avatarOn = false;
     try { screen.destroy(); } catch { /* */ }
   }
 
   // Suspend blessed → run on the real terminal → restore. Mirrors the readline
   // REPL's stdin-listener save/restore so handler ora/inquirer/console all work.
   async function runDetached(label: string, fn: () => Promise<void> | void): Promise<void> {
+    if (avatarProtocol === 'kitty' && avatarImageId) {
+      try { process.stdout.write(clearKittyImage(avatarImageId)); } catch { /* */ }
+    }
     const program = screen.program;
     const stdin: any = process.stdin;
     const dataL = stdin.rawListeners('data').slice();
@@ -917,112 +984,142 @@ export function createTuiScreen(opts: TuiScreenOpts): TuiSurface {
   // repaint would otherwise overwrite the region). Opt-in + fully guarded so it can never tear
   // the session down; when off it's a no-op and the normal TUI is untouched.
   let avatarFrames: string[][] = [];
+  let avatarNativeFrames: (string | null)[] = [];
   let avatarIdx = 0;
   let avatarOn = false;
   let avatarTimer: ReturnType<typeof setInterval> | null = null;
   let avatarPainting = false;
-  // Speech-sync: when the voice is speaking we advance frames every tick so the
-  // mouth (already animated across the i2v idle frames) flaps in time with the
-  // audio; when quiet we advance every 3rd tick for a gentle idle/breathing loop.
   let avatarSpeaking: (() => boolean) | null = null;
-  // Separate mouth-open/close sequence played WHILE talking (voice audio OR streaming tokens).
-  // When empty, talking just speeds the base loop (old behaviour); when present, the pane swaps to
-  // these frames so the mouth actually moves in sync with the answer — real lip-sync, not a fast idle.
   let avatarTalkFrames: string[][] = [];
+  let avatarTalkNativeFrames: (string | null)[] = [];
+  let avatarProtocol: GraphicsProtocol = 'halfblock';
+  let avatarImageId = 4242;
+  let avatarCaption: (() => string) | null = null;
   let avatarTick = 0;
-  // The exact physical rectangle last painted (1-based col, row count). Recorded so
-  // hiding the pane can ERASE those cells — they live outside blessed's buffer, so a
-  // plain screen.render() never clears them (blessed sees no damage there).
-  let avatarRect: { startCol: number; w: number; lines: number } | null = null;
+  // The exact physical rectangle last painted (1-based topRow/col, width, line count).
+  let avatarRect: { topRow: number; startCol: number; w: number; lines: number } | null = null;
 
-  /** The frame set to paint right now: the talk sequence while talking (if provided), else the
-   *  base idle/emotion loop. Re-evaluated every paint so it reverts the instant talking stops. */
-  function activeAvatarFrames(): string[][] {
+  function activeAvatarState(): { frames: string[][]; natives: (string | null)[] } {
     const talking = (() => { try { return !!avatarSpeaking?.(); } catch { return false; } })();
-    return (talking && avatarTalkFrames.length) ? avatarTalkFrames : avatarFrames;
+    if (talking && avatarTalkFrames.length) {
+      return { frames: avatarTalkFrames, natives: avatarTalkNativeFrames };
+    }
+    return { frames: avatarFrames, natives: avatarNativeFrames };
   }
 
-  /** Screen columns the trace pane currently spans (it starts at 60%). */
-  function traceRegionCols(): number {
-    const cols = Number((screen as any).width) || process.stdout.columns || 100;
-    return Math.max(0, cols - Math.floor(cols * TRACE_LEFT_FRACTION));
+  function currentAvatarLayout(screenCols: number, requested: number): AvatarLayout {
+    return traceVisible
+      ? avatarLayout(screenCols, requested)
+      : avatarLayoutWhenTraceHidden(screenCols, requested);
   }
 
   /**
-   * Widest dockable avatar. The avatar is painted RAW at absolute terminal coordinates
-   * down the right edge — the same region the trace pane occupies — so without a cap it
-   * silently overwrites trace content. That was visible as interleaved half-blocks and
-   * trace text in the same rows.
+   * Widest dockable avatar. Reserves columns from whichever pane owns the right edge
+   * (trace when visible, output when trace is hidden) so the avatar NEVER overlaps text.
    */
   function maxAvatarCols(): number {
     const cols = Number((screen as any).width) || process.stdout.columns || 100;
-    return avatarLayout(cols, Number.MAX_SAFE_INTEGER).avatarCols;
+    return currentAvatarLayout(cols, Number.MAX_SAFE_INTEGER).avatarCols;
   }
 
-  /**
-   * Give the avatar its own columns instead of letting it overpaint the trace pane.
-   *
-   * The avatar cannot be a blessed element (blessed downsamples 24-bit truecolor to its
-   * 16/256 palette, which is the whole reason this pane is raw-painted), so blessed cannot
-   * lay out around it. Shrinking the trace box by the avatar's width is what keeps the two
-   * from occupying the same cells.
-   */
   function reserveAvatarColumns(cols: number | null): void {
     try {
-      const screenCols = Number((screen as any).width) || process.stdout.columns || 100;
-      const want = cols == null ? 0 : avatarLayout(screenCols, cols).traceRight;
-      const current = Number((trace as any).position?.right ?? 0);
-      if (current === want) return;
-      (trace as any).position.right = want;
+      reservedAvatarCols = cols;
+      applySplit();
       screen.render();
     } catch { /* layout is best-effort — never break the TUI over the avatar */ }
   }
 
+  function eraseAvatarCells(): void {
+    if (avatarProtocol === 'kitty' && avatarImageId) {
+      try { process.stdout.write(clearKittyImage(avatarImageId)); } catch { /* */ }
+    }
+    if (!avatarRect) return;
+    const { topRow, startCol, w, lines } = avatarRect;
+    try {
+      let out = '\x1b7\x1b[?25l';
+      for (let r = 0; r < lines; r++) {
+        out += '\x1b[' + (topRow + r) + ';' + startCol + 'H' + ' '.repeat(w);
+      }
+      out += '\x1b8';
+      process.stdout.write(out);
+    } catch { /* */ }
+    try { screen.clearRegion(startCol - 1, startCol - 1 + w, topRow - 1, topRow - 1 + lines); } catch { /* */ }
+    avatarRect = null;
+  }
+
   function paintAvatar(): void {
-    if (!avatarOn || !avatarFrames.length || avatarPainting) return;
+    // Never paint over an open full-screen overlay, command picker, or editor!
+    if (!avatarOn || !avatarFrames.length || avatarPainting || _pickerOpen) return;
     avatarPainting = true;
     try {
-      const set = activeAvatarFrames();
-      const frame = set[avatarIdx % set.length] || [];
+      const { frames, natives } = activeAvatarState();
+      const idx = avatarIdx % frames.length;
+      const frame = frames[idx] || [];
+      const nativePayload = natives[idx] ?? null;
       const cols = Number((screen as any).width) || process.stdout.columns || 100;
       const rows = Number((screen as any).height) || process.stdout.rows || 40;
-      // visible width = chars remaining after stripping SGR escapes from the first line
       const first = frame.find(l => l.length) || '';
-      const w = first.replace(/\x1b\[[0-9;]*m/g, '').length || 24;
-      // Same geometry the trace reservation used — computing it twice, two ways, is how the
-      // paint and the layout come to disagree and overlap again.
-      const startCol = avatarLayout(cols, w).avatarStartCol;
-      const maxLines = Math.min(frame.length, Math.max(1, rows - 4));  // don't cover the input box
-      avatarRect = { startCol, w, lines: maxLines };  // remember what to erase on hide
-      let out = '\x1b7\x1b[?25l';                     // save cursor + hide
-      for (let r = 0; r < maxLines; r++) {
-        out += '\x1b[' + (r + 1) + ';' + startCol + 'H' + frame[r] + '\x1b[0m';
+      const w = first.replace(/\x1b\[[0-9;]*m/g, '').length || 20;
+      const geom = currentAvatarLayout(cols, w);
+      if (geom.avatarCols <= 0) return;
+      const startCol = geom.avatarStartCol;
+      const topRow = AVATAR_TOP_ROW; // row 2: NEVER overwrite row 1 statusBar
+      // Leave room for the top statusBar (1), bottom status + input (4), and 1 caption row.
+      const maxImgLines = Math.min(frame.length, Math.max(1, rows - paneBottom - topRow - 1));
+      const captionRaw = (() => { try { return avatarCaption?.() || ''; } catch { return ''; } })();
+      const totalLines = maxImgLines + (captionRaw ? 1 : 0);
+      avatarRect = { topRow, startCol, w: geom.avatarCols, lines: totalLines };
+
+      let out = '\x1b7\x1b[?25l';
+      if (nativePayload && avatarProtocol !== 'halfblock') {
+        out += `\x1b[${topRow};${startCol}H` + nativePayload;
+      } else {
+        for (let r = 0; r < maxImgLines; r++) {
+          out += `\x1b[${topRow + r};${startCol}H` + frame[r] + '\x1b[0m';
+        }
       }
-      out += '\x1b8';                                 // restore cursor
+      if (captionRaw) {
+        const capRow = topRow + maxImgLines;
+        const clipped = fitText(captionRaw, Math.max(4, geom.avatarCols));
+        const pad = ' '.repeat(Math.max(0, geom.avatarCols - clipped.replace(/\x1b\[[0-9;]*m/g, '').length));
+        out += `\x1b[${capRow};${startCol}H\x1b[0m` + chalk.dim(clipped) + pad + '\x1b[0m';
+      }
+      out += '\x1b8';
       process.stdout.write(out);
     } catch { /* never let the avatar break the TUI */ }
     finally { avatarPainting = false; }
   }
 
   // Repaint after blessed renders (blessed clobbers the corner otherwise).
-  try { screen.on('render', () => { if (avatarOn) setImmediate(paintAvatar); }); } catch { /* */ }
+  try { screen.on('render', () => { if (avatarOn && !_pickerOpen) setImmediate(paintAvatar); }); } catch { /* */ }
+  try { screen.on('resize', () => { if (avatarOn) { applySplit(); setImmediate(paintAvatar); } }); } catch { /* */ }
 
   function setAvatarPane(frames: string[][] | null,
-                         opts?: { isSpeaking?: () => boolean; talkFrames?: string[][] }): boolean {
+                         opts?: {
+                           isSpeaking?: () => boolean;
+                           talkFrames?: string[][];
+                           nativeFrames?: (string | null)[];
+                           talkNativeFrames?: (string | null)[];
+                           protocol?: GraphicsProtocol;
+                           imageId?: number;
+                           caption?: () => string;
+                         }): boolean {
     try {
       if (frames && frames.length) {
         avatarFrames = frames; avatarIdx = 0; avatarOn = true;
         avatarSpeaking = opts?.isSpeaking ?? avatarSpeaking;
         if (opts && 'talkFrames' in opts) avatarTalkFrames = opts.talkFrames ?? [];
-        // Run the ticker if EITHER the base loop or the talk loop has multiple frames.
-        // Reserve columns BEFORE painting, so the first paint lands beside the trace pane
-        // rather than on top of it.
+        if (opts && 'nativeFrames' in opts) avatarNativeFrames = opts.nativeFrames ?? [];
+        if (opts && 'talkNativeFrames' in opts) avatarTalkNativeFrames = opts.talkNativeFrames ?? [];
+        if (opts?.protocol) avatarProtocol = opts.protocol;
+        if (opts?.imageId != null) avatarImageId = opts.imageId;
+        if (opts && 'caption' in opts) avatarCaption = opts.caption ?? null;
         const first = frames.find(l => l.length)?.[0] ?? '';
-        reserveAvatarColumns(first.replace(/\x1b\[[0-9;]*m/g, '').length || 24);
+        reserveAvatarColumns(first.replace(/\x1b\[[0-9;]*m/g, '').length || 20);
         if (!avatarTimer && (frames.length > 1 || avatarTalkFrames.length > 1)) {
-          // Base tick 120ms. Talking → advance every tick (mouth in sync with audio/tokens) and the
-          // active set is the talk sequence; idle → advance every 3rd tick (~360ms gentle loop).
           avatarTimer = setInterval(() => {
+            if (_pickerOpen) return;
             avatarTick++;
             const speaking = (() => { try { return !!avatarSpeaking?.(); } catch { return false; } })();
             if (speaking || avatarTick % 3 === 0) { avatarIdx++; paintAvatar(); }
@@ -1031,25 +1128,9 @@ export function createTuiScreen(opts: TuiScreenOpts): TuiSurface {
         paintAvatar();
       } else {
         avatarOn = false; avatarFrames = []; avatarTalkFrames = [];
+        avatarNativeFrames = []; avatarTalkNativeFrames = [];
         if (avatarTimer) { clearInterval(avatarTimer); avatarTimer = null; }
-        // Erase the raw-painted cells: (1) blank them on the PHYSICAL terminal (blessed
-        // never tracked them, so render() alone won't), then (2) mark the region damaged
-        // in blessed's buffer so the next render redraws whatever belongs underneath
-        // (trace pane border, background). Without step 1 the portrait stays on screen.
-        if (avatarRect) {
-          const { startCol, w, lines } = avatarRect;
-          try {
-            let out = '\x1b7\x1b[?25l';
-            for (let r = 0; r < lines; r++) {
-              out += '\x1b[' + (r + 1) + ';' + startCol + 'H' + ' '.repeat(w);
-            }
-            out += '\x1b8\x1b[?25h';
-            process.stdout.write(out);
-          } catch { /* */ }
-          try { screen.clearRegion(startCol - 1, startCol - 1 + w, 0, lines); } catch { /* */ }
-          avatarRect = null;
-        }
-        // Hand the columns back so the trace pane returns to full width.
+        eraseAvatarCells();
         reserveAvatarColumns(null);
         try { screen.render(); } catch { /* */ }
       }

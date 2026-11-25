@@ -21,7 +21,8 @@ run `dist/main.js`. TypeScript, ESM, Node >= 18.
 
 - **Backend ladder** (`src/backend-resolver.ts`): a pinned endpoint
   (`--gateway` / `AITHER_API_URL` / config `api_url`) is honoured verbatim and
-  DISABLES the ladder → local agent daemon `127.0.0.1:9001` → local gateway
+  DISABLES the ladder — except a pin to the bare edge gateway (no tools), which yields to a
+  healthy local daemon out loud (`AWSH_HONOR_REMOTE_PIN=1` keeps it) → local agent daemon `127.0.0.1:9001` → local gateway
   `127.0.0.1:8001` → cloud. A switch is reported, never silent.
   `AITHERSHELL_USE_ADK=0` skips the daemon.
 - **Input dispatch** (`src/repl.ts`): `/…` opens a command, `!…` runs in
@@ -30,6 +31,8 @@ run `dist/main.js`. TypeScript, ESM, Node >= 18.
 - **Context files**: `src/context-loader.ts` reads `CLAUDE.md` / `AGENTS.md` /
   `AITHER.md` + `.claude/rules/*.md` on `/project switch`. They do NOT reach the
   model prompt: the dead `getWorkspaceContext()` helper was deleted; do not revive it.
+- **Grounding** (`src/grounding.ts`): every non-pack turn carries the platform context,
+  a per-message tool hint, a loopback snapshot and `awm recall`; `AWSH_GROUNDING=0` drops it.
 - **The model prompt** is the pack's `system_prompt` sent as `system_additions`
   (a list) in `src/client.ts`; `test/pack-prompt-reaches-model.test.ts` pins it.
 

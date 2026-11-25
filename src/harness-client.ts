@@ -71,32 +71,26 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 function usage(): void {
-  console.log(`aither harness — one shell that drives every coding shell
+  console.log(`awsh harness — one shell that drives every coding shell
 
-  aither harness list                       live sessions
-  aither harness harnesses                  what this box can drive
-  aither harness agents                     sovereign agent roster
-  aither harness skills                     skills and slash commands a session can be handed
-                                            (<cwd>/.claude then ~/.claude)
-  aither harness new [--harness claude|claude-tty|terminal…] [--model-profile deepseek-flash]
-                     [--cwd .] [--title T] [--agent atlas] [--target <container>]
-                     [--skill gauntlet] [--skill-arguments "…"]   (see: aither harness skills)
-                     [--extra-args "--flag,--flag2"]   (claude-tty/terminal argv)
-  aither harness send <id> <text…>
-  aither harness attach <id>                follow the event stream
-  aither harness attach --pty <id>          put THIS terminal on a pty session (Ctrl+] detaches)
-  aither harness tell <target> <text…>      say it to ONE session: a session id, a Claude id,
-                                            a unique prefix of either, or a unique title word.
-                                            Lands now in a tab awsh opened; at the end of the
-                                            current turn in any other tab.
-  aither harness wrap [claude|terminal|<harness>] [--cwd .] [--title T] [--model-profile P]
-                                            start a daemon-owned pty session and put THIS
-                                            terminal on it (claude -> claude-tty). Closing
-                                            the tab does not end it; Ctrl+] detaches.
-  aither harness kill <id>
+  awsh harness up [--status|--down|--dry-run]  start local daemons (hookd, awsh :8362, aw-hub) & wire agents
+  awsh harness list                         live sessions
+  awsh harness harnesses                    what this box can drive (antigravity, claude, codex, gemini, adk…)
+  awsh harness agents                       sovereign agent roster
+  awsh harness skills                       skills and slash commands a session can be handed
+  awsh harness new [--harness antigravity|claude|claude-tty|codex|gemini|adk|terminal…]
+                   [--model-profile deepseek-flash] [--cwd .] [--title T] [--agent atlas]
+                   [--target <container>] [--skill gauntlet] [--skill-arguments "…"]
+                   [--extra-args "--flag,--flag2"]
+  awsh harness send <id> <text…>
+  awsh harness attach <id>                  follow the event stream
+  awsh harness attach --pty <id>            put THIS terminal on a pty session (Ctrl+] detaches)
+  awsh harness tell <target> <text…>        steer ONE session by id, prefix, or unique title word
+  awsh harness wrap [claude|terminal|<h>]   start a daemon-owned pty session and attach (Ctrl+] detaches)
+  awsh harness kill <id>
 
-Sessions live in the daemon (adk harness serve), so one started here is the
-same session the browser attaches to on aitherium.com.`);
+Sessions live in the daemon (adk harness serve / awsh up), so one started here is the
+same session Antigravity, awdesk, and the browser attach to.`);
 }
 
 export interface TellRow {
@@ -239,6 +233,11 @@ export async function runHarnessCommand(args: string[]): Promise<number> {
   if (!sub || sub === 'help' || sub === '--help' || sub === '-h') {
     usage();
     return 0;
+  }
+  if (sub === 'up' || sub === 'down' || sub === 'status') {
+    const { runUpCommand } = await import('./up-command.js');
+    const forwarded = sub === 'up' ? args.slice(1) : [`--${sub}`, ...args.slice(1)];
+    return runUpCommand(forwarded);
   }
   try {
     switch (sub) {

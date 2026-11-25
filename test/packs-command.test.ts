@@ -10,6 +10,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   buildPacksArgv, runPacksCommand, exploreViaAdk, splitArgs, AWDK_INSTALL_HINT, EXPLORE_CAP,
+  buildCatalogueArgv, runCatalogueCommand,
 } from '../src/packs-command.js';
 
 test('argv: pack verbs map 1:1 onto adk pack; uninstall reads as remove', () => {
@@ -21,6 +22,36 @@ test('argv: pack verbs map 1:1 onto adk pack; uninstall reads as remove', () => 
   assert.deepEqual(buildPacksArgv('pack', []), ['-m', 'adk.cli', 'pack', 'list']);
   assert.deepEqual(buildPacksArgv('skills', ['install', 'acp-drive', '--target', 'project']),
     ['-m', 'adk.cli', 'skills', 'install', 'acp-drive', '--target', 'project']);
+});
+
+test('catalogue: find|add|remove map 1:1 onto adk catalog; add/remove need an id', () => {
+  assert.deepEqual(buildCatalogueArgv('find', ['hearth']), ['-m', 'adk.cli', 'catalog', 'find', 'hearth']);
+  assert.deepEqual(buildCatalogueArgv('find', []), ['-m', 'adk.cli', 'catalog', 'find']);
+  assert.deepEqual(buildCatalogueArgv('add', ['sprite', '--dry-run']),
+    ['-m', 'adk.cli', 'catalog', 'add', 'sprite', '--dry-run']);
+  assert.deepEqual(buildCatalogueArgv('remove', ['awnode']), ['-m', 'adk.cli', 'catalog', 'remove', 'awnode']);
+  assert.equal(buildCatalogueArgv('add', []), null);
+  assert.equal(buildCatalogueArgv('remove', ['--dry-run']), null);
+});
+
+test('catalogue: delegates with adk exit status; no id is refused with the next action first', () => {
+  const seen: string[][] = [];
+  const lines: string[] = [];
+  const deps = { log: (l: string) => { lines.push(l); }, adkReady: () => true,
+    runPython: (argv: string[]) => { seen.push(argv); return 0; } };
+  assert.equal(runCatalogueCommand('add', ['hearth'], deps), 0);
+  assert.deepEqual(seen, [['-m', 'adk.cli', 'catalog', 'add', 'hearth']]);
+  assert.equal(runCatalogueCommand('add', [], deps), 2);
+  assert.equal(seen.length, 1);
+  assert.ok(lines.join('\n').includes('Next: aither find'));
+});
+
+test('catalogue: an awdk too old for the catalogue answers with the upgrade line', () => {
+  const lines: string[] = [];
+  const code = runCatalogueCommand('find', ['x'], { log: (l) => { lines.push(l); }, adkReady: () => false,
+    runPython: () => { throw new Error('must not run'); } });
+  assert.equal(code, 3);
+  assert.ok(lines.join('\n').includes('pip install -U awdk'));
 });
 
 test('refused: unknown verb, and a verb that needs an id without one', () => {

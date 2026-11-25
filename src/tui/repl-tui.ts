@@ -9,6 +9,23 @@
  * pickers inside command handlers don't work under blessed — use AITHER_TUI=0
  * for those; everything else runs in-pane.
  */
+import {
+  avatarCropFromConfig,
+  avatarProtocolFromConfig,
+  personaAvatarFromCast,
+  phaseEmotion,
+  shouldAutoDock,
+} from './avatar-autodock.js';
+import {
+  detectGraphicsProtocol,
+  GRAPHICS_PROTOCOLS,
+  listAvailableAvatars,
+  renderAvatarFile,
+  resolveAvatarDir,
+  type GraphicsProtocol,
+  type ProtocolPreference,
+} from './terminal-graphics.js';
+import type { PortraitCropMode } from './portrait.js';
 import { execFile, execSync } from 'node:child_process';
 import { isSecretBearing, redactForHistory } from '../secret-input.js';
 import { appendFileSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
@@ -280,30 +297,42 @@ export async function startTuiRepl(client: GenesisClient, config: ShellConfig): 
       currentRenderer?.renderIdleFrame?.(voice.isSpeaking() ? 'talking' : 'idle');
     } catch { /* */ }
   }, 320);
-  // Portrait frames live in assets/<name>-portrait/. A "character" is that name
-  // (aither, bunny, …). Resolution order: env override > persisted /avatar choice
-  // (~/.aither/config.json "avatar") > default 'aither'. Switchable live via
-  // `/avatar <name>` — no env var needed. renderPortrait() → null on empty dir → ASCII.
+  // Portrait frames resolve across ~/.aither/avatars/<name>-portrait, full dev assets/,
+  // and npm-shipped assets-bundled/ so EVERY install has animated terminal avatars.
   const assetsRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'assets');
-  const avatarDirOf = (name: string): string => join(assetsRoot, `${name}-portrait`);
+  const avatarDirOf = (name: string): string => resolveAvatarDir(name) || join(assetsRoot, `${name}-portrait`);
   function listAvatars(): string[] {
-    try {
-      return readdirSync(assetsRoot, { withFileTypes: true })
-        .filter(d => d.isDirectory() && d.name.endsWith('-portrait'))
-        .map(d => d.name.replace(/-portrait$/, '')).sort();
-    } catch { return []; }
+    return listAvailableAvatars();
   }
   function saveAvatarChoice(name: string): void {
     try {
-      const cfg = readAitherConfig(); cfg.avatar = name;
+      const cfg = readAitherConfig(); cfg.avatar = name; cfg.avatar_set_at = new Date().toISOString();
       mkdirSync(join(homedir(), '.aither'), { recursive: true });
       writeFileSync(aitherConfigPath, JSON.stringify(cfg, null, 2), 'utf-8');
     } catch { /* best-effort */ }
   }
+  function saveAvatarPref(key: 'avatar_protocol' | 'avatar_crop', value: string): void {
+    try {
+      const cfg = readAitherConfig(); cfg[key] = value;
+      mkdirSync(join(homedir(), '.aither'), { recursive: true });
+      writeFileSync(aitherConfigPath, JSON.stringify(cfg, null, 2), 'utf-8');
+    } catch { /* best-effort */ }
+  }
+  let avatarProtocolPref: ProtocolPreference = avatarProtocolFromConfig(readAitherConfig());
+  let avatarCropMode: PortraitCropMode = avatarCropFromConfig(readAitherConfig());
+  const activeAvatarProtocol = (): GraphicsProtocol =>
+    detectGraphicsProtocol(process.env, avatarProtocolPref).protocol;
+
+  // Precedence: AITHER_PORTRAIT_DIR > a choice made with `/avatar <name>` (stamped
+  // avatar_set_at) > the awdesk cast persona (the face the desk shows) > aither.
   let portraitDir = process.env.AITHER_PORTRAIT_DIR || (() => {
-    const saved = readAitherConfig().avatar;
-    return (typeof saved === 'string' && saved && existsSync(avatarDirOf(saved)))
-      ? avatarDirOf(saved) : avatarDirOf('aither');
+    const cfg = readAitherConfig();
+    const saved = cfg.avatar;
+    const savedDir = typeof saved === 'string' && saved ? resolveAvatarDir(saved) : null;
+    if (savedDir && cfg.avatar_set_at) return savedDir;
+    const persona = personaAvatarFromCast(config.defaultAgent || 'aither', listAvatars());
+    if (persona) return avatarDirOf(persona);
+    return savedDir || avatarDirOf('aither');
   })();
   let currentRenderer: StreamRenderer | null = null;
 
@@ -422,6 +451,10 @@ export async function startTuiRepl(client: GenesisClient, config: ShellConfig): 
       // never over a turn that is already running.
       if (bootNextPending && !processing) {
         bootNextPending = false;
+        // The portrait pane docks itself on a wide truecolor terminal (AWSH_AVATAR=0 opts out).
+        if (!avatarPaneOn && shouldAutoDock(process.env, process.stdout.columns || 0)) {
+          toggleAvatarPane('on');
+        }
         paintHomeNext(nextPlan(info, ranked, nowSec));
         idleStatus();
       }
@@ -512,39 +545,87 @@ export async function startTuiRepl(client: GenesisClient, config: ShellConfig): 
       return;
     }
 
-    // Special case: sessions view with live polling
+    // Special case: sessions cockpit with live polling AND interactive actions (i to command)
     if (kind === 'sessions') {
       let pollInterval: ReturnType<typeof setInterval> | null = null;
-      let lastError: string | null = null;
+      let lastSnap: UnifiedSession[] = [];
+      let pendingFocusTarget: string | null = null;
 
       async function renderSessions(): Promise<string[]> {
-        // Never throws: a down daemon falls back to reading Claude Code's own
-        // state files + transcripts, rendered view-only (cap = none).
         const snap = await fetchSessionsWithFallback();
-        lastError = snap.daemonError ?? null;
+        lastSnap = snap.sessions;
         return buildSessionsPanel(snap.sessions, w, { source: snap.source, daemonError: snap.daemonError });
       }
 
-      // Render once, then set up polling
       lines = await renderSessions();
-
-      // Set up polling: refresh every 2 seconds while viewer is open
       pollInterval = setInterval(async () => {
         try {
           lines = await renderSessions();
           surface.updateViewer?.(lines);
         } catch {
-          // Poll errors are silent — don't spam the display
+          // Poll errors are silent
         }
       }, 2000);
 
+      const handleCockpitCmd = async (raw: string): Promise<string> => {
+        const parts = raw.trim().split(/\s+/);
+        const verb = (parts[0] || '').toLowerCase();
+        if (!verb) return '';
+        // Bare number or `focus <n|id>` → mark target; close hint or steer directly
+        if (verb === 'focus' || /^\d+$/.test(verb)) {
+          const target = verb === 'focus' ? (parts[1] || '') : verb;
+          const hit = resolveSessionTarget(lastSnap, target);
+          if (!hit) return `no session matches "${target}"`;
+          pendingFocusTarget = hit.id;
+          return `selected ${hit.title} (${hit.id.slice(0, 10)}) — press q to open live tail, or type: steer ${target} <msg>`;
+        }
+        if (verb === 'steer') {
+          const target = parts[1] || '';
+          const msg = parts.slice(2).join(' ').trim();
+          if (!target || !msg) return 'usage: steer <n|id> <message>';
+          const hit = resolveSessionTarget(lastSnap, target);
+          if (!hit) return `no session matches "${target}"`;
+          const res = await steerFocusedSession(hit, msg);
+          lines = await renderSessions();
+          surface.updateViewer?.(lines);
+          return `${hit.title}: ${res.message}`;
+        }
+        if (verb === 'new' || verb === 'spawn') {
+          const harness = parts[1] || 'claude';
+          const title = parts.slice(2).join(' ').trim() || `${harness} · awsh`;
+          const { api } = await import('../harness-client.js');
+          const created = await api<{ id: string }>('/sessions', {
+            method: 'POST',
+            body: JSON.stringify({ harness, cwd: process.cwd(), title }),
+          });
+          lines = await renderSessions();
+          surface.updateViewer?.(lines);
+          return `started ${harness} session ${created.id}`;
+        }
+        if (verb === 'kill' || verb === 'stop') {
+          const target = parts[1] || '';
+          const hit = resolveSessionTarget(lastSnap, target);
+          if (!hit) return `no session matches "${target}"`;
+          const { api } = await import('../harness-client.js');
+          await api(`/sessions/${encodeURIComponent(hit.id)}`, { method: 'DELETE' });
+          lines = await renderSessions();
+          surface.updateViewer?.(lines);
+          return `stopped ${hit.title} (${hit.id.slice(0, 10)})`;
+        }
+        return 'commands: steer <n> <msg> · focus <n> · new <antigravity|claude|codex|gemini|adk> [title] · kill <n>';
+      };
+
       try {
-        await surface.showViewer(title || 'Sessions (Ctrl+S)', lines);
+        await surface.showViewer(title || 'Sessions Cockpit (Ctrl+S)', lines, {
+          onSubmit: handleCockpitCmd,
+          inputHint: 'steer <n> <msg> · focus <n> · new <harness> · kill <n>',
+        });
       } finally {
-        // Clean up poll interval when viewer closes
         if (pollInterval) clearInterval(pollInterval);
       }
-
+      if (pendingFocusTarget) {
+        await focusSession(pendingFocusTarget);
+      }
       return;
     }
 
@@ -669,18 +750,27 @@ export async function startTuiRepl(client: GenesisClient, config: ShellConfig): 
       chalk.dim(` — voice ${voice.getVoice()} · speed ${voice.getSpeed().toFixed(2)}×. "/voice speed <n>" to tune · "/voice off" to stop.`));
   }
 
-  /** Load a directory of `frame_NN.png` into rendered frames, or [] if the dir is absent/empty. */
-  function loadFrameDir(dir: string, cols: number): string[][] {
-    if (!existsSync(dir)) return [];
-    const files = readdirSync(dir).filter(f => /^frame_\d+\.png$/i.test(f)).sort();
-    return files.map(f => renderPngFile(join(dir, f), cols)).filter((x): x is string[] => !!x);
+  interface LoadedAvatarClip {
+    frames: string[][];
+    natives: (string | null)[];
   }
 
-  /** Load Aither's animation frames at a given width for the docked pane. When an `emotion` is
-   *  given and `<portraitDir>/<emotion>/` holds a frame sequence, play THAT clip (the motion
-   *  library we rendered per emotion); otherwise fall back to the idle breathing loop, then to
-   *  expression stills. Frames are padded to a common height so the painted region stays
-   *  rectangular. */
+  /** Load a directory of `frame_NN.png` into half-block + native pixel frames. */
+  function loadFrameDir(dir: string, cols: number, maxRows: number): LoadedAvatarClip {
+    if (!existsSync(dir)) return { frames: [], natives: [] };
+    const proto = activeAvatarProtocol();
+    const files = readdirSync(dir).filter(f => /^frame_\d+\.png$/i.test(f)).sort();
+    const frames: string[][] = [];
+    const natives: (string | null)[] = [];
+    for (const f of files) {
+      const r = renderAvatarFile(join(dir, f), {
+        cols, maxRows, crop: avatarCropMode, protocol: proto, imageId: 4242, noCursorMove: true,
+      });
+      if (r) { frames.push(r.lines); natives.push(r.nativePayload); }
+    }
+    return { frames, natives };
+  }
+
   /** Pad every frame to a common height so the raw-painted region stays rectangular. */
   function padFrames(frames: string[][], cols: number): string[][] {
     if (!frames.length) return frames;
@@ -689,98 +779,122 @@ export async function startTuiRepl(client: GenesisClient, config: ShellConfig): 
     return frames;
   }
 
-  /** Pad TWO frame sets (idle/emotion + talk) to ONE shared height. The pane swaps between them, and
-   *  `paintAvatar` only erases the current frame's rows — so if the sets differed in height the taller
-   *  set would leave un-erased ghost rows on swap. For char-5 they're equal, but this guarantees it for
-   *  any future character whose talk and emotion clips have different frame dimensions. */
   function reconcileHeights(a: string[][], b: string[][], cols: number): void {
     const h = Math.max(0, ...a.map(f => f.length), ...b.map(f => f.length));
     for (const set of [a, b]) for (const f of set) while (f.length < h) f.push(' '.repeat(cols));
   }
 
-  function loadAvatarFrames(cols: number, emotion?: string): string[][] {
-    let frames: string[][] = [];
-    if (emotion && emotion !== 'neutral') {
-      frames = loadFrameDir(join(portraitDir, emotion), cols);
-    }
-    if (!frames.length) frames = loadFrameDir(join(portraitDir, 'idle'), cols);
-    if (!frames.length) {
-      frames = ['neutral', 'happy', 'curious', 'angry']
-        .map(e => renderPortrait(portraitDir, e, { cols }))
-        .filter((f): f is string[] => Array.isArray(f) && f.length > 0);
-    }
-    return padFrames(frames, cols);
+  function avatarMaxRows(): number {
+    return Math.max(8, Math.min(22, (process.stdout.rows || 34) - 8));
   }
 
-  /** Load the mouth-sync sequence for the pane: `<portraitDir>/<emotion>-talk-N.png` (falls back to
-   *  the generic `neutral-talk-N.png`). Played WHILE Aither is talking so the mouth actually moves. */
-  function loadTalkFrames(cols: number, emotion?: string): string[][] {
-    const collect = (name: string): string[][] => {
-      const out: string[][] = [];
+  function loadAvatarFrames(cols: number, emotion?: string): LoadedAvatarClip {
+    const maxRows = avatarMaxRows();
+    let clip: LoadedAvatarClip = { frames: [], natives: [] };
+    if (emotion && emotion !== 'neutral') {
+      clip = loadFrameDir(join(portraitDir, emotion), cols, maxRows);
+    }
+    if (!clip.frames.length) clip = loadFrameDir(join(portraitDir, 'idle'), cols, maxRows);
+    if (!clip.frames.length) {
+      const proto = activeAvatarProtocol();
+      for (const e of ['neutral', 'happy', 'curious', 'angry']) {
+        const p = join(portraitDir, `${e}.png`);
+        const r = renderAvatarFile(p, {
+          cols, maxRows, crop: avatarCropMode, protocol: proto, imageId: 4242, noCursorMove: true,
+        });
+        if (r) { clip.frames.push(r.lines); clip.natives.push(r.nativePayload); }
+      }
+    }
+    padFrames(clip.frames, cols);
+    return clip;
+  }
+
+  /** Load the mouth-sync sequence: `<portraitDir>/<emotion>-talk-N.png` → `neutral-talk-N.png`. */
+  function loadTalkFrames(cols: number, emotion?: string): LoadedAvatarClip {
+    const maxRows = avatarMaxRows();
+    const proto = activeAvatarProtocol();
+    const collect = (name: string): LoadedAvatarClip => {
+      const frames: string[][] = [];
+      const natives: (string | null)[] = [];
       for (let i = 0; i < 16; i++) {
         const p = join(portraitDir, `${name}-talk-${i}.png`);
         if (!existsSync(p)) break;
-        const r = renderPngFile(p, cols);
-        if (r) out.push(r);
+        const r = renderAvatarFile(p, {
+          cols, maxRows, crop: avatarCropMode, protocol: proto, imageId: 4242, noCursorMove: true,
+        });
+        if (r) { frames.push(r.lines); natives.push(r.nativePayload); }
       }
-      return out;
+      return { frames, natives };
     };
-    let frames = emotion ? collect(emotion) : [];
-    if (frames.length < 2) frames = collect('neutral');
-    return padFrames(frames, cols);
+    let clip = emotion ? collect(emotion) : { frames: [], natives: [] };
+    if (clip.frames.length < 2) clip = collect('neutral');
+    padFrames(clip.frames, cols);
+    return clip;
   }
 
-  // The emotion whose clip the docked pane is currently playing — so we only reload frames when
-  // the affect actually changes (reloading every 2.5s poll would thrash the terminal).
+  const currentAvatarName = (): string =>
+    portraitDir.replace(/[/\\]+$/, '').split(/[/\\]/).pop()!.replace(/-portrait$/, '');
+
   let avatarEmotion = 'neutral';
-  let avatarCols = 18;
-  // Timestamp of the last streamed answer token. Drives the mouth WITHOUT needing TTS: the avatar
-  // lip-syncs to the text stream. Bumped in the streamChat loop; a short window means the mouth
-  // closes ~0.45s after tokens stop (between tool calls / at end of turn) rather than flapping on.
+  let avatarCols = 20;
   let lastAnswerTokenAt = 0;
   const TALK_WINDOW_MS = 450;
-  /** Is Aither talking right now? In VOICE mode the answer body is buffered and revealed WITH audio,
-   *  so the mouth must follow the audio (not the hidden token stream) — mirrors the controller's own
-   *  `suppressBody ? isSpeaking : sawToken` rule. In text mode, lip-sync to the live token stream. */
   function isTalkingNow(): boolean {
     if (voice.isEnabled()) return voice.isSpeaking();
     return Date.now() - lastAnswerTokenAt < TALK_WINDOW_MS;
   }
+  const avatarCaptionText = (): string => {
+    const proto = activeAvatarProtocol();
+    const stateWord = isTalkingNow() ? 'talking' : avatarEmotion;
+    return `✦ ${currentAvatarName()} · ${stateWord}${proto !== 'halfblock' ? ` · ${proto}` : ''}`;
+  };
 
-  /** Dock the truecolor avatar pane at `cols` wide. Status goes to the transient
-   *  bottom strip — NOT the chat pane, which is for conversation only. */
+  /** Dock the avatar pane at `cols` wide. Status goes to the transient bottom strip. */
   function dockAvatar(requested: number, msg: string): void {
-    // The avatar is painted RAW over the terminal's right edge — the trace pane's own
-    // columns — so a width the layout has not reserved silently overwrites trace text.
-    // That interleaving is what a corrupted-looking TUI actually was.
     const room = surface.maxAvatarCols?.() ?? requested;
-    if (room < 8) { surface.setStatus('terminal too narrow for the avatar pane'); return; }
-    const cols = Math.max(8, Math.min(requested, room));
+    if (room < 10) { surface.setStatus('terminal too narrow for the avatar pane'); return; }
+    const cols = Math.max(10, Math.min(requested, room));
     avatarCols = cols;
     avatarEmotion = emotionFromAffect(avatarAffect() ?? undefined) || 'neutral';
-    const frames = loadAvatarFrames(cols, avatarEmotion);
-    if (!frames.length) {
-      surface.setStatus('no portrait art — add PNG frames to assets/aither-portrait/idle/'); return;
+    const clip = loadAvatarFrames(cols, avatarEmotion);
+    if (!clip.frames.length) {
+      surface.setStatus('no portrait art — add PNG frames to ~/.aither/avatars/aither-portrait/'); return;
     }
     const talk = loadTalkFrames(cols, avatarEmotion);
-    reconcileHeights(frames, talk, cols);
-    if (cols < requested) msg += ` (${cols} cols — trace pane keeps the rest)`;
-    avatarPaneOn = surface.setAvatarPane(frames, { isSpeaking: isTalkingNow, talkFrames: talk });
-    surface.setStatus(avatarPaneOn ? '▓ ' + msg : 'avatar pane could not start');
+    reconcileHeights(clip.frames, talk.frames, cols);
+    const proto = activeAvatarProtocol();
+    if (cols < requested) msg += ` (${cols} cols)`;
+    avatarPaneOn = surface.setAvatarPane(clip.frames, {
+      isSpeaking: isTalkingNow,
+      talkFrames: talk.frames,
+      nativeFrames: clip.natives,
+      talkNativeFrames: talk.natives,
+      protocol: proto,
+      imageId: 4242,
+      caption: avatarCaptionText,
+    });
+    surface.setStatus(avatarPaneOn ? `✦ ${msg} [${proto}/${avatarCropMode}]` : 'avatar pane could not start');
   }
 
-  /** Swap the docked pane to the clip for `emotion` (only when the pane is on and the emotion
-   *  actually changed). Called from the affect poller so the avatar reacts to Aither's mood. */
+  /** Swap the docked pane to the clip for `emotion` when the affect/phase changes. */
   function updateAvatarEmotion(emotion: string): void {
     if (!avatarPaneOn) return;
     const e = emotion || 'neutral';
     if (e === avatarEmotion) return;
-    const frames = loadAvatarFrames(avatarCols, e);
-    if (!frames.length) return;
+    const clip = loadAvatarFrames(avatarCols, e);
+    if (!clip.frames.length) return;
     avatarEmotion = e;
     const talk = loadTalkFrames(avatarCols, e);
-    reconcileHeights(frames, talk, avatarCols);
-    surface.setAvatarPane(frames, { isSpeaking: isTalkingNow, talkFrames: talk });
+    reconcileHeights(clip.frames, talk.frames, avatarCols);
+    surface.setAvatarPane(clip.frames, {
+      isSpeaking: isTalkingNow,
+      talkFrames: talk.frames,
+      nativeFrames: clip.natives,
+      talkNativeFrames: talk.natives,
+      protocol: activeAvatarProtocol(),
+      imageId: 4242,
+      caption: avatarCaptionText,
+    });
     personaEmotion(e);
   }
 
@@ -790,45 +904,89 @@ export async function startTuiRepl(client: GenesisClient, config: ShellConfig): 
     surface.setStatus(msg);
   }
 
-  /** /avatar [on|off|show|hide|toggle|list|<name>] — toggle / SELECT the top-right animated
-   *  pane. `/avatar list` shows the roster; `/avatar bunny` switches character live and
-   *  persists it (no env var). Ctrl+P docks a wider version of the same pane. */
+  /**
+   * /avatar [on|off|toggle|list|<name>|protocol <p>|crop <bust|full>|mood <e>|sync]
+   */
   function toggleAvatarPane(arg: string): void {
     const a = arg.trim();
-    const low = a.toLowerCase();
-    const cols = Math.max(14, Math.min(24, Math.floor((process.stdout.columns || 100) / 5)));
-    const current = (): string =>
-      portraitDir.replace(/[/\\]+$/, '').split(/[/\\]/).pop()!.replace(/-portrait$/, '');
+    const parts = a.split(/\s+/).filter(Boolean);
+    const low = (parts[0] || '').toLowerCase();
+    const cols = Math.max(16, Math.min(26, Math.floor((process.stdout.columns || 100) / 5)));
 
     if (low === 'off' || low === 'hide') { hideAvatar(); return; }
     if (low === 'toggle') {
       if (avatarPaneOn) { hideAvatar(); return; }
-      dockAvatar(cols, `avatar on (${current()}) — /avatar list to see all · /avatar off to hide.`);
+      dockAvatar(cols, `avatar on (${currentAvatarName()}) — /avatar list · /avatar protocol · /avatar off`);
       return;
     }
     if (low === 'list' || low === 'ls' || low === '?') {
-      const names = listAvatars(); const cur = current();
+      const names = listAvatars(); const cur = currentAvatarName();
+      const det = detectGraphicsProtocol(process.env, avatarProtocolPref);
       surface.outputLine(chalk.cyan('Avatars: ')
         + (names.map(n => n === cur ? chalk.green(`${n} ◀`) : n).join(chalk.dim(' · ')) || chalk.dim('(none)'))
-        + chalk.dim('   — /avatar <name> to switch'));
+        + chalk.dim(`   [protocol: ${det.protocol} (${avatarProtocolPref}) · crop: ${avatarCropMode}]`));
+      surface.outputLine(chalk.dim('  /avatar <name> · /avatar protocol <auto|kitty|sixel|iterm2|halfblock> · /avatar crop <bust|full> · /avatar mood <e> · /avatar sync'));
+      return;
+    }
+    if (low === 'protocol' || low === 'proto') {
+      const want = (parts[1] || '').toLowerCase();
+      if (!want) {
+        const det = detectGraphicsProtocol(process.env, avatarProtocolPref);
+        surface.outputLine(chalk.cyan(`  avatar protocol: ${det.protocol}`)
+          + chalk.dim(` (pref: ${avatarProtocolPref} · ${det.reason}) — options: ${GRAPHICS_PROTOCOLS.join(', ')}`));
+        return;
+      }
+      if (!GRAPHICS_PROTOCOLS.includes(want as ProtocolPreference)) {
+        surface.setStatus(`unknown protocol "${want}" — use: ${GRAPHICS_PROTOCOLS.join(', ')}`);
+        return;
+      }
+      avatarProtocolPref = want as ProtocolPreference;
+      saveAvatarPref('avatar_protocol', want);
+      if (avatarPaneOn) { hideAvatar(); dockAvatar(cols, `avatar protocol → ${activeAvatarProtocol()}`); }
+      else surface.setStatus(`avatar protocol saved: ${want} (resolved: ${activeAvatarProtocol()})`);
+      return;
+    }
+    if (low === 'crop' || low === 'frame') {
+      const want = (parts[1] || '').toLowerCase();
+      if (want !== 'bust' && want !== 'full') {
+        surface.setStatus(`avatar crop is "${avatarCropMode}" — use: /avatar crop bust | full`);
+        return;
+      }
+      avatarCropMode = want;
+      saveAvatarPref('avatar_crop', want);
+      if (avatarPaneOn) { hideAvatar(); dockAvatar(cols, `avatar framing → ${want}`); }
+      else surface.setStatus(`avatar framing saved: ${want}`);
+      return;
+    }
+    if (low === 'mood' || low === 'emotion') {
+      const emo = (parts[1] || 'happy').toLowerCase();
+      if (!avatarPaneOn) dockAvatar(cols, `avatar on (${currentAvatarName()})`);
+      avatarEmotion = ''; // force swap
+      updateAvatarEmotion(emo);
+      surface.setStatus(`avatar mood → ${emo}`);
+      return;
+    }
+    if (low === 'sync') {
+      const persona = personaAvatarFromCast(config.defaultAgent || 'aither', listAvatars());
+      if (!persona) { surface.setStatus('no matching persona found in awdesk cast.json'); return; }
+      portraitDir = avatarDirOf(persona); saveAvatarChoice(persona);
+      if (avatarPaneOn) hideAvatar();
+      dockAvatar(cols, `synced avatar from awdesk → ${persona}`);
       return;
     }
     if (a && low !== 'on' && low !== 'show') {
-      // Treat the arg as a character name.
-      if (!existsSync(avatarDirOf(low))) {
-        // The transient status strip, NOT the chat pane — an error about a typo is not
-        // part of the conversation, and printing it there corrupts the transcript.
+      const dir = resolveAvatarDir(low);
+      if (!dir) {
         surface.setStatus(`unknown avatar "${a}" — available: ${listAvatars().join(', ') || '(none)'}`);
         return;
       }
-      portraitDir = avatarDirOf(low); saveAvatarChoice(low);
+      portraitDir = dir; saveAvatarChoice(low);
       if (avatarPaneOn) hideAvatar();
       dockAvatar(cols, `avatar → ${low} — animates top-right while you chat. /avatar off to hide.`);
       return;
     }
-    // bare /avatar toggles off if already on; an explicit `show`/`on` always docks.
     if (avatarPaneOn && low !== 'on' && low !== 'show') { hideAvatar(); return; }
-    dockAvatar(cols, `avatar on (${current()}) — /avatar list to see all · /avatar off to hide.`);
+    dockAvatar(cols, `avatar on (${currentAvatarName()}) — /avatar list · /avatar protocol · /avatar off`);
   }
 
   const surface: TuiSurface = createTuiScreen({
@@ -1997,6 +2155,9 @@ export async function startTuiRepl(client: GenesisClient, config: ShellConfig): 
           if (retryTimeline) surface.setTimeline(retryTimeline);
           surface.startTraceTurn((input.length > 32 ? input.slice(0, 32) + '…' : input) + ' (retry)');
         }
+        // Thinking state: the curious clip plays until the first answer token arrives.
+        if (avatarPaneOn) updateAvatarEmotion(phaseEmotion('thinking', avatarEmotion));
+        let thinkingClip = avatarPaneOn;
         let sawTerminal = false;   // complete/done/error/timeout/interrupt arrived
         let interrupted = false;   // transport died mid-turn
         let toolFired = false;     // tools ran — retry could double side-effects
@@ -2010,7 +2171,13 @@ export async function startTuiRepl(client: GenesisClient, config: ShellConfig): 
           })) {
             renderer.onEvent(ev);
             // Drive the docked avatar's mouth from the answer stream (lip-sync without TTS).
-            if (ev.type === 'token' || ev.type === 'answer') lastAnswerTokenAt = Date.now();
+            if (ev.type === 'token' || ev.type === 'answer') {
+              lastAnswerTokenAt = Date.now();
+              if (thinkingClip) {
+                thinkingClip = false;
+                updateAvatarEmotion(phaseEmotion('talking', emotionFromAffect(avatarAffect() ?? undefined)));
+              }
+            }
             if (ev.type === 'complete' || ev.type === 'done' || ev.type === 'error'
                 || ev.type === 'llm_error' || ev.type === 'stream_timeout') sawTerminal = true;
             if (ev.type === 'stream_interrupted') { sawTerminal = true; interrupted = true; }
@@ -2052,6 +2219,8 @@ export async function startTuiRepl(client: GenesisClient, config: ShellConfig): 
       }
     } finally {
       activeAbort = null; processing = false;
+      // Turn over: leave the thinking clip for the affect's own emotion.
+      if (avatarPaneOn) updateAvatarEmotion(phaseEmotion('idle', emotionFromAffect(avatarAffect() ?? undefined)));
       // Flush any job_done outputs that were queued while the turn was in flight
       for (const pending of pendingJobOutput) {
         surface.outputLine(chalk.dim(pending.content));

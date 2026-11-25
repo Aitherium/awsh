@@ -217,6 +217,8 @@ export function renderBanner(info: {
   agents?: number;
   llm?: string;
   user?: string;
+  /** Active Aitherium workspace label (workspace-context.ts). */
+  workspace?: string | null;
   serviceLines?: { name: string; up: boolean }[];
   backendType?: string;
   backendName?: string;
@@ -258,7 +260,9 @@ export function renderBanner(info: {
   const downNames = probed.filter(s => !s.up).map(s => s.name);
   const upCount = upNames.length;
 
-  const userLine = info.user ? `Logged in as ${info.user}` : '';
+  const userLine = info.user
+    ? `Logged in as ${info.user}${info.workspace ? `  ·  workspace ${info.workspace}` : ''}`
+    : (info.workspace ? `workspace ${info.workspace}` : '');
 
   // MODERN LANGUAGE (2026-07-24): the old flat-cyan ASCII box with `UP:`/`DN:`
   // caps was a SECOND visual language in a shell whose boot header had already

@@ -14,6 +14,11 @@
 // real CA-issued certs) keep strict TLS — those validate normally and must stay
 // protected against MITM. NODE_EXTRA_CA_CERTS is still set when present (harmless,
 // and helps any service that IS chain-issued).
+// FIRST import, on purpose: it must run before string-width (via ora) constructs an
+// Intl.Segmenter at module load -- on a node whose Segmenter segfaults, that load
+// killed awsh before its first prompt (intl-segmenter-guard.ts).
+import { activeWorkspaceLabel } from './workspace-context.js';
+import './intl-segmenter-guard.js';
 import { existsSync } from 'fs';
 import { resolveActingIdentity } from './auth.js';
 import { isPrivateHost, relaxTlsForPrivateTrustDomain } from './tls-trust.js';
@@ -107,7 +112,7 @@ import { GenesisClient, VISION_MODEL } from './client.js';
 import { renderBanner, createStreamRenderer } from './renderer.js';
 import { computeNextAction } from './next-action.js';
 import { setPromptFacts } from './prompt-state.js';
-import { buildProbes, discoverLocalServices, probeHealth, pickServingModel } from './status-banner.js';
+import { buildProbes, parseDockerPs, probeHealth, pickServingModel } from './status-banner.js';
 import { startRepl } from './repl.js';
 import { installCrashReporter, setCurrentCommand } from './crash-reporter.js';
 import { installCredentialGuard } from './credential-guard.js';
@@ -202,7 +207,7 @@ async function main() {
   // never reach a subcommand's own help — the flag was swallowed before dispatch. Subcommands
   // that print their own usage opt in here; everything else keeps the old behaviour exactly,
   // so this cannot regress a command that has no help of its own.
-  const HELP_AWARE = new Set(['bonsai', 'storage', 'claude', 'ops', 'backups']);
+  const HELP_AWARE = new Set(['bonsai', 'storage', 'claude', 'ops', 'backups', 'avatar', 'up', 'antigravity', 'harness']);
   if ((args.includes('--help') || args.includes('-h')) && !HELP_AWARE.has((args[0] || '').toLowerCase())) {
     printUsage();
     return;
@@ -933,6 +938,47 @@ $rows | ForEach-Object { [Console]::Out.WriteLine("PATH=" + $_) }`;
     process.exit(code);
   }
 
+  // ── `awsh avatar …` — terminal avatars (Kitty / Sixel / iTerm2 / 24-bit half-block) ──
+  // Offline-first: runs before backend resolution so avatars render even with no fleet.
+  if (args[0] && args[0].toLowerCase() === 'avatar') {
+    const { runAvatarCommand } = await import('./avatar-command.js');
+    process.exitCode = await runAvatarCommand(args.slice(1));
+    return;
+  }
+
+  // ── `awsh up …` — one-command local harness boot (paired with awdk 4.0 `adk harness up`) ──
+  if (args[0] && args[0].toLowerCase() === 'up') {
+    const { runUpCommand } = await import('./up-command.js');
+    process.exitCode = runUpCommand(args.slice(1));
+    return;
+  }
+
+  // ── `awsh antigravity …` — 2-way Google Antigravity + Aither harness bridge ──
+  if (args[0] && (args[0].toLowerCase() === 'antigravity' || args[0].toLowerCase() === 'ag')) {
+    const { runAntigravityCommand } = await import('./up-command.js');
+    process.exitCode = await runAntigravityCommand(args.slice(1));
+    return;
+  }
+
+  // ── Daily-driver verbs (daily-driver.ts) ───────────────────────────────
+  // `agent` (a tool-using Claude Code agent session the harness daemon owns),
+  // `status` (fleet + Atlas board + waiting cards), `agents`, `cards`, `board`.
+  // Intercepted BEFORE backend resolution and before the Python passthrough: none
+  // of them talks to a chat backend, and on the awnix fleet distro the ladder's
+  // pick (the :8099 demo agent) knows nothing about the fleet (measured 2026-11-09).
+  const DAILY_VERBS = new Set(['agent', 'status', 'agents', 'cards', 'board']);
+  if (args[0] && DAILY_VERBS.has(args[0].toLowerCase())) {
+    const d = await import('./daily-driver.js');
+    const verb = args[0].toLowerCase();
+    const rest = args.slice(1);
+    process.exitCode = verb === 'agent' ? await d.runAgent(rest)
+      : verb === 'status' ? await d.runStatus(undefined, true)
+        : verb === 'agents' ? await d.runAgents(rest.join(' '))
+          : verb === 'cards' ? await d.runCards(rest.join(' '))
+            : await d.runBoard();
+    return;
+  }
+
   // ── Python AitherShell passthrough (adk-shell) ─────────────────────────
   // The command-center surfaces live in the Python shell (awdk):
   // sessions manager/browser, hq dashboard, unified inbox, agents console,
@@ -940,7 +986,7 @@ $rows | ForEach-Object { [Console]::Out.WriteLine("PATH=" + $_) }`;
   // `aither sessions` was intent-classified as a CHAT PROMPT. Spawn adk-shell
   // with inherited stdio so its TUIs own the terminal.
   const PY_SHELL_CMDS = new Set([
-    'sessions', 'hq', 'inbox', 'palette', 'brief', 'watch', 'agents', 'docker',
+    'sessions', 'hq', 'inbox', 'palette', 'brief', 'watch', 'docker',
   ]);
   // `aither sessions live|cockpit|--live|--watch` is the unified cockpit (the Ctrl+S
   // overlay) rendered on this terminal; every other `sessions` verb stays Python's.
@@ -1122,6 +1168,13 @@ $rows | ForEach-Object { [Console]::Out.WriteLine("PATH=" + $_) }`;
     process.exitCode = runPacksCommand('pack', args.slice(1));
     return;
   }
+  // `aither find|add|remove …` -- the catalogue: one verb on every surface, delegated
+  // to `adk catalog find|add|remove` (adk.catalog_person owns rows, steps and undo).
+  if (args[0] && ['find', 'add', 'remove'].includes(args[0].toLowerCase())) {
+    const { runCatalogueCommand } = await import('./packs-command.js');
+    process.exitCode = runCatalogueCommand(args[0].toLowerCase() as 'find' | 'add' | 'remove', args.slice(1));
+    return;
+  }
   if (args[0] && args[0].toLowerCase() === 'skills' && args[1]) {
     const { runPacksCommand } = await import('./packs-command.js');
     process.exitCode = runPacksCommand('skills', args.slice(1));
@@ -1143,6 +1196,19 @@ $rows | ForEach-Object { [Console]::Out.WriteLine("PATH=" + $_) }`;
   if (args[0] && ['posture', 'house'].includes(args[0].toLowerCase())) {
     const { runPostureCommand } = await import('./posture-command.js');
     process.exitCode = await runPostureCommand(args.slice(1));
+    return;
+  }
+  // `aither listen [mic|dnd on|off]` -- what Aither hears on this machine, and the two
+  // desk switches; `aither registry [agent|can <words>|catalogue [words]]` -- what every
+  // agent can call, load and add. Local-only (~/.aither, the desk's settings file).
+  if (args[0] && ['listen', 'hears'].includes(args[0].toLowerCase())) {
+    const { runListenCommand } = await import('./controls-command.js');
+    process.exitCode = await runListenCommand(args.slice(1));
+    return;
+  }
+  if (args[0] && args[0].toLowerCase() === 'registry') {
+    const { runRegistryCommand } = await import('./controls-command.js');
+    process.exitCode = await runRegistryCommand(args.slice(1));
     return;
   }
   if (args[0] && ['shop', 'license'].includes(args[0].toLowerCase())) {
@@ -1456,7 +1522,11 @@ async function showBanner(client: GenesisClient, config: ShellConfig) {
   // shows "no services detected" when services ARE actually up.
   // The probe set adapts to the configured endpoints: a remote endpoint
   // probes the PUBLIC authenticated edges it actually talks to, not 127.0.0.1.
-  const probes = buildProbes(config, discoverLocalServices());
+  // ONE runtime ask (docker, then podman) feeds both the probe set and the fleet count.
+  const { containerPs, summarizePs } = await import('./fleet-health.js');
+  const ps = containerPs();
+  const fleet = ps ? summarizePs(ps.text, ps.runtime) : null;
+  const probes = buildProbes(config, ps ? parseDockerPs(ps.text) : null);
 
   const probeResults = await Promise.all(
     probes.map(async (p) => ({ name: p.name, up: await probeHealth(p.url) }))
@@ -1523,10 +1593,13 @@ async function showBanner(client: GenesisClient, config: ShellConfig) {
   renderBanner({
     genesis: host,
     genesisOnline,
-    services: backend.services ?? (upCount > 0 ? upCount : undefined),
+    // The runtime's count when it answered: a chat backend's own `services` is ITS
+    // view (the :8099 demo agent says 1), not the fleet's.
+    services: fleet ? fleet.running : (backend.services ?? (upCount > 0 ? upCount : undefined)),
     agents: backend.agents,
     llm,
     user: authUser,
+    workspace: activeWorkspaceLabel(),
     serviceLines,
     backendType: backend.type,
     backendName: backend.name,
@@ -1678,6 +1751,22 @@ async function oneShotChat(
   const renderer = (fmt === 'text' && !omnibox) ? createStreamRenderer() : null;
   renderer?.begin();  // see StreamRenderer.begin() -- covers time-to-first-byte
   const started = Date.now();
+  // The omnibox buffers, so without this the shell sat blank for up to 120 s
+  // with no sign the agent was working (owner, 2026-11-11). One self-erasing
+  // stderr line: elapsed seconds and the last tool, cleared before the answer.
+  let omniboxStatus = '';
+  const omniboxTicker = (omnibox && fmt === 'text' && process.stderr.isTTY)
+    ? setInterval(() => {
+        const s = Math.round((Date.now() - started) / 1000);
+        process.stderr.write('\r\x1b[K' + chalk.dim('  ⬢ thinking… ' + s + 's' +
+          (omniboxStatus ? '  ·  ' + omniboxStatus : '')));
+      }, 1000)
+    : null;
+  const stopOmniboxTicker = () => {
+    if (!omniboxTicker) return;
+    clearInterval(omniboxTicker);
+    process.stderr.write('\r\x1b[K');
+  };
 
   try {
     for await (const event of client.streamChat(message, opts)) {
@@ -1697,6 +1786,7 @@ async function oneShotChat(
         }
         case 'tool_call':
           for (const t of (d.tools || d.tool_calls || [])) tools.push(t.name || t.function?.name || 'tool');
+          if (tools.length) omniboxStatus = tools[tools.length - 1];
           break;
         // The SOURCES come from the TOOL OUTPUT, never from the prose.
         // Measured 2026-08-23: the search returned five dated stories with
@@ -1716,9 +1806,16 @@ async function oneShotChat(
         case 'complete': case 'done':
           if (d.model) model = d.model;
           if (d.content) answer = String(d.content); break;
-        case 'error': case 'llm_error': errors.push(String(d.message || d.error || 'error')); break;
+        // The spine's queue/lane line ("queued on llamacpp_local (2 of 3)") while no
+        // token has arrived -- client.streamChat emits it as phase spine_queue.
+        case 'status': if (d.phase === 'spine_queue') omniboxStatus = String(d.message || ''); break;
+        case 'error': case 'llm_error':
+          errors.push(String(d.message || d.error || 'error'));
+          omniboxStatus = 'retrying after: ' + errors[errors.length - 1].slice(0, 60);
+          break;
       }
     }
+    stopOmniboxTicker();
     if (renderer) renderer.finish();
     if (renderer && answer === '') answer = renderer.getContent();
     if (omnibox && fmt === 'text') {
@@ -1737,6 +1834,10 @@ async function oneShotChat(
       // degrades to readable text on a terminal without OSC 8.
       const text = linkifyTerminal(stripWrappingFence(stripOmniboxOpener(answer)));
       if (text) process.stdout.write(text + (text.endsWith('\n') ? '' : '\n'));
+      // Say WHY there is no answer: the server's error event names the cause
+      // ("ConnectionError" = the agent found no model), which "(no answer)" hid.
+      else if (errors.length) process.stdout.write(chalk.red('  agent error: ' +
+                                          errors[errors.length - 1].slice(0, 200)) + '\n');
       else process.stdout.write(chalk.dim('  (no answer from the agent — try: awsh "' +
                                           (process.env.AWSH_OMNIBOX_LINE || '') + '")\n'));
       // Printed even when the prose already cites them: a duplicated source is
@@ -1754,6 +1855,7 @@ async function oneShotChat(
       process.stdout.write(chalk.dim(`  ⬢ ${servedBy}  ·  ${((Date.now() - started) / 1000).toFixed(1)}s\n`));
     }
   } catch (err: any) {
+    stopOmniboxTicker();
     if (err.name === 'AbortError') return false;
     const msg = err.message || 'unknown error';
     if (fmt === 'json') { process.stdout.write(JSON.stringify({ ok: false, error: msg, session_id: config.sessionId }) + '\n'); return false; }
@@ -1788,117 +1890,49 @@ async function oneShotChat(
 
 function printUsage() {
   console.log(`
-${chalk.bold('aither')} \u2014 AitherOS interactive terminal
+${chalk.bold(`awsh ${VERSION}`)} \u2014 AitherShell: your agent cockpit & terminal with live avatars
 
-${chalk.bold('Usage:')}
-  aither                          Start interactive REPL
-  aither "message"                One-shot: send, print, exit
-  aither -c <command>             Execute a slash command and exit
-  aither -f <task>                Forge dispatch and exit
-  aither --help                   Show this help
-  aither --version                Show version
+${chalk.bold('Daily driver:')}
+  awsh                            Open the full-screen TUI cockpit (live avatar docked)
+  awsh up [--status|--down]       Boot local harness daemons (hookd, awsh :8362, aw-hub) & wire agents
+  awsh agent [name]               Persistent tool-using agent session (--harness antigravity|claude|codex|gemini|adk)
+  awsh sessions live              Unified cockpit over every active agent tab & daemon session
+  awsh status                     Fleet health, Atlas board, and waiting decision cards
+  awsh cards [answer <n> <opt>]   List or answer waiting decision cards inline
+  awsh agents [spawn <n> "<p>"]   Agent roster and background agent spawner
+  awsh avatar [show|list|use|protocol|crop|demo|sync]
+                                  Render & configure terminal avatars (Kitty · Sixel · iTerm2 · half-block)
+  awsh antigravity [setup|doctor|sessions|spawn|steer]
+                                  2-way Google Antigravity + Aither harness bridge
+  awsh harness <up|list|harnesses|new|send|attach|tell|wrap|kill>
+                                  Drive any coding harness through the daemon (:8362)
+  awsh doctor [--json]            Check local setup, daemon health, and connectivity
 
-${chalk.bold('One-shot flags:')}
-  -c, --command <cmd>             Execute slash command (status, agents, services, gaming, apps, etc.)
-  -f, --forge <task>              Dispatch task via Forge
-  -a, --agent <name>              Agent for chat/forge (default: aither)
-      --will <name>               Alias for --agent (e.g. --will iris)
-  -e, --effort <N>                Effort level 1-10 (higher = deeper/quality)
-  -s, --safety <level>            Safety: unrestricted, casual, professional
-      --private                   Private mode (prompt hidden from logs/training)
-  -i, --image <path>              Attach image for vision analysis (repeatable)
+${chalk.bold('Quick questions & one-shot:')}
+  awsh "question"                 Ask once, print, exit
+  awsh -p "prompt" < file         Headless / pipe mode (--output-format text|json|stream-json)
+  awsh -c <command>               Run a slash command and exit
+  awsh -f "<task>"                Forge dispatch and exit
+  awsh -a <agent> -i <img.png>    Route to an agent or attach an image for vision
+  awsh --continue | --resume <id> Resume a previous conversation
 
-${chalk.bold('Portable gateway mode (run anywhere with internet + an aither_sk_live_* key):')}
-      --gateway [url]             Point inference + MCP tools at the public gateway
-                                  (default https://gateway.aitherium.com); forces raw inference
-      --inference-mode <mode>     auto (default) | genesis (orchestrated pipeline) |
-                                  raw (bypass Genesis → model direct via gateway/MicroScheduler)
-                                  Env: AITHER_GATEWAY_URL, AITHER_INFERENCE_MODE, AITHER_MCP_URL,
-                                  AITHER_LLM_URL. Auth via your aither_sk_live_* key (aither login).
+${chalk.bold('Backends (local-first, never silent):')}
+  --gateway [url]                 Public gateway (default https://gateway.aitherium.com)
+  --deepseek [flash|reasoner]     Direct DeepSeek (DEEPSEEK_API_KEY, no fleet required)
+  --kimi [k3|max]                 Direct Moonshot Kimi (MOONSHOT_API_KEY)
+  --inference-mode auto|genesis|raw
 
-${chalk.bold('Direct provider (no fleet required — works when Genesis/MCP are down):')}
-      --deepseek [variant]        Talk straight to api.deepseek.com. flash (default) |
-                                  reasoner | <model>. Needs DEEPSEEK_API_KEY (or
-                                  AITHER_DEEPSEEK_API_KEY). Pins the endpoint: no failover.
-      --kimi, --moonshot [var]    Talk straight to api.moonshot.ai. k3 | max | <model>.
-                                  Needs MOONSHOT_API_KEY. Also pins the endpoint.
+${chalk.bold('TUI & Avatars:')}
+  TUI mode is ON by default on TTYs (set AITHER_TUI=0 for native line mode).
+  Avatar auto-docks on wide truecolor/graphics terminals (AWSH_AVATAR=0 to disable).
+  Graphics protocol auto-detects Kitty/Ghostty/WezTerm, iTerm2, Sixel, or 24-bit half-block
+  (override with AWSH_AVATAR_PROTOCOL=kitty|sixel|iterm2|halfblock or \`awsh avatar protocol\`).
+  Inside TUI: Ctrl+P portrait · Ctrl+S interactive sessions cockpit · Ctrl+T trace · / picker
 
-${chalk.bold('Headless / scripting:')}
-  -p, --print [prompt]            Headless: read prompt from arg and/or piped stdin, print, exit
-      --output-format <fmt>       text (default) | json | stream-json
-      --json                      Shorthand for -p --output-format json
-  Exit code 0 on success, 1 on error.  Examples:
-    aither -p "summarize" < notes.md
-    cat error.log | aither -p "what failed?" --output-format json
-    git diff | aither -p "review this diff" --json
-
-${chalk.bold('Sessions (persistent transcripts in ~/.aither/sessions):')}
-      --continue, -C              Resume the most recent conversation
-      --resume <id>               Resume a specific session id (replays context)
-      --session <id>              Alias for --resume
-  In-shell: /chats [resume|delete <id>] · /export [path] [--json] · /copy · /tokens · /rewind [N] · /compact
-
-${chalk.bold('Auth:')}
-      --login                     Device-flow sign-in (portal.aitherium.com/link)
-      --key <token>               Authenticate with an API key
-  In-shell: /login · /whoami · /logout   (remote endpoints require sign-in)
-
-${chalk.bold('TUI:')}
-  Interactive mode defaults to the native line-mode shell (line editing, history, paste).
-  AITHER_TUI=1 opts into the blessed 3-pane TUI: answer pane (left) + collapsible
-  per-turn trace threads (right; Ctrl+E expand/collapse, click a header to toggle).
-  AITHER_STEER=1 enables the fixed bottom steering bar (limits terminal scrollback).
-
-${chalk.bold('Quick actions:')}
-  awsh rc                         Make this machine reachable from your phone:
-                                  enrols it and holds the link, so its sessions
-                                  show up at api.aitherium.com/code
-                                  [--node-class laptop] [--once]
-  aither storage nodes             Storage inventory: nodes, drives, freshness
-  aither ops backups verify        Platform ops (dry run unless --apply)
-                                  [k=v] [--apply] [--agent genesis] [--watch]
-  aither claude "<task>"          Hand a task to a scoped Claude Code subagent
-                                  [--allow Read,Grep] [--budget 0.25] [--timeout 300] [--goal <id>]
-  aither -c "gpu sleep"           GPU sleep: park the 5090 models, lanes to the Spark (game on)
-  aither -c "gpu wake"            GPU wake: models back one at a time (game off)
-  aither -c "fleet sleep"         Fleet sleep / wake / critical / status (fleet_verbs.py)
-  aither -c apps                  Show all AitherOS app statuses
-  aither -c "apps install desktop"  How to install or update the Aither app
-  aither -c "apps start veil"    Start AitherVeil dashboard
-
-${chalk.bold('Examples:')}
-  aither -c status                Print system status and exit
-  aither -c agents                List agents and exit
-  aither -f "refactor auth module" -a demiurge -e 7
-  aither "What services are running?"
-  aither --will iris "draw a cyberpunk cityscape"
-  aither --will iris -e 8 "masterpiece portrait, 8k"
-  aither --will iris --safety unrestricted --private "private prompt"
-  aither --will saga "tell me about the ancient ruins"
-  aither --image screenshot.png "what's in this image?"
-  aither -i photo.jpg -i diagram.png "compare these two"
-
-${chalk.bold('Environment variables:')}
-  AITHER_API_URL                  Backend URL (Genesis or ADK server)
-  AITHER_GENESIS_URL              Legacy alias for AITHER_API_URL
-  AITHER_AGENT                    Default agent (default: aither)
-  AITHER_MODEL                    LLM model override
-
-${chalk.bold('Config file:')}
-  ~/.aither/shell.yaml            Optional (api_url, default_agent, model)
-
-${chalk.bold('Interactive commands:')}
-  /help        Show all commands       /agents      List agents
-  /status      System status           /services    List services
-  /forge       Dispatch to Forge       /logs        View logs
-  /gpu         GPU sleep/wake/status   /apps        Manage AitherOS apps
-  /sessions    List recent sessions    /resume      Resume a session
-  /model       Show/set model          /clear       Clear screen
-  exit         Quit
-
-${chalk.bold('Routing:')}
-  @agent_name message             Route to specific agent
-  message                         Route to default agent
+${chalk.bold('Auth & Shell setup:')}
+  awsh login | whoami | logout    Sign in / check acting identity
+  awsh init <pwsh|bash|zsh|terminal>   Install omnibox shell integration
+  awsh rc                         Make this machine reachable from your phone
 `);
 }
 

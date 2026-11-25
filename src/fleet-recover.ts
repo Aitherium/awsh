@@ -13,7 +13,7 @@
  *
  * The distro is resolved by the same rule as AitherOS/lib/core/fleet_distro.py
  * (env AITHER_FLEET_DISTRO, AITHER_WSL_DISTRO, FLEET_DISTRO, AWDESK_FLEET_DISTRO;
- * then nodes.<debian-fleet>.fleet_distro in AitherOS/config/nodes.yaml; then
+ * then nodes.<awnix>.fleet_distro in AitherOS/config/nodes.yaml; then
  * "awnix"). awsh ships standalone, so this is a stdlib copy, not an import.
  */
 import { existsSync, readFileSync } from 'node:fs';
@@ -28,12 +28,12 @@ const UP_STATES = new Set(['running', 'degraded', 'starting', 'initializing']);
 
 type Env = Record<string, string | undefined>;
 
-/** nodes.<debian-fleet>.fleet_distro from a nodes.yaml text, or null. Same line scan as the Python resolver. */
+/** nodes.<awnix>.fleet_distro from a nodes.yaml text, or null. Same line scan as the Python resolver. */
 export function readNodesFleetDistro(text: string): string | null {
   let indent = -1;
   for (const line of text.replace(/^\uFEFF/, '').split(/\r?\n/)) {
     if (indent < 0) {
-      const m = /^(\s*)debian-fleet:\s*(#.*)?$/.exec(line);
+      const m = /^(\s*)awnix:\s*(#.*)?$/.exec(line);
       if (m) indent = m[1].length;
       continue;
     }

@@ -118,11 +118,11 @@ completes them.
 <!-- aither-harness:start GENERATED from ecosystem.yaml `harness:` by gen_brick_map.py. Edits between these markers are overwritten; change the registry. -->
 > **`awsh` is part of `awharness` — the super agent harness.** One name for the kit, the shell and the bricks an agent works with, taken together. It is a harness that sits above other harnesses: the shell drives Google Antigravity, Claude Code, Codex and the rest as real products, and the bricks give every one of them the same memory, jobs, leases, permits and tools.
 >
-> **Today:** `adk harness up` brings up the local harness daemons (`hookd`, `awsh`, `aw-hub`), checks installed bricks (`adk harness parts`), and auto-wires detected coding agents (`adk antigravity setup`, `adk claude setup`). Each optional brick still installs on its own line (`pip install awdk`, `npm i -g @aitherium/awsh`).
+> **Today:** Turnkey one-line installers (`curl -fsSL https://aitherium.com/install.sh | sh` on macOS/Linux, `irm https://aitherium.com/install.ps1 | iex` on Windows, or zero-Python `uv` via `awdk/install/install.{sh,ps1}`) install `awdk`, wire the wizard, and `adk harness up` brings up the local harness daemons (`hookd`, `awsh`, `aw-hub`), checks installed bricks (`adk harness parts`), and auto-wires detected coding agents (`adk antigravity setup`, `adk claude setup`). Individual optional bricks also install standalone (`pip install awdk`, `npm i -g @aitherium/awsh`).
 >
 > **Planned, not built:** One umbrella installer package that installs every composed brick together under the `awharness` name. Nothing by that package name is published yet.
 >
-> The other 10 composed bricks: `awdk` `awskills` `awm` `awgraph` `awrun` `awrise` `awgit` `awpermit` `awrelay` `awnode`. All 102 bricks, in layers: https://aitherium.github.io/#map
+> The other 10 composed bricks: `awdk` `awskills` `awm` `awgraph` `awrun` `awrise` `awgit` `awpermit` `awrelay` `awnode`. All 96 bricks, in layers: https://aitherium.github.io/#map
 <!-- aither-harness:end -->
 
 `awsh` is the part you type into. What it adds to a terminal that only talks to

@@ -1,11 +1,9 @@
 # awshell
 
-Long-name alias for `awsh` - the same shell, for anyone who searches the full word.
+Long-name alias for `awsh` — the same shell, for anyone who searches the full word.
 
-```
-npm i -g @aitherium/shell-cli
+```bash
+npm i -g @aitherium/awsh
 ```
 
-> `awsh` is not on the registry yet — the rename is mid-flight. Install
-> `@aitherium/shell-cli` for now and use the `aither` command; every name
-> ships from the same package, so nothing changes for you when it lands.
+`@aitherium/awsh` is the canonical package on npm and installs the `awsh`, `aither`, and `aither-shell` commands. See [Aitherium/awsh](https://github.com/Aitherium/awsh).

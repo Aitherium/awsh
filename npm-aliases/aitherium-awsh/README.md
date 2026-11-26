@@ -1,11 +1,9 @@
-# @aitherium/awsh
+# aitherium-awsh
 
-Scoped alias for `awsh`. Both names install the same shell; `awsh` is canonical.
+Unscoped alias for `awsh`. Both names install the same shell; `@aitherium/awsh` is canonical.
 
+```bash
+npm i -g @aitherium/awsh
 ```
-npm i -g @aitherium/shell-cli
-```
 
-> `awsh` is not on the registry yet — the rename is mid-flight. Install
-> `@aitherium/shell-cli` for now and use the `aither` command; every name
-> ships from the same package, so nothing changes for you when it lands.
+`@aitherium/awsh` is published on npm and installs the `awsh`, `aither`, and `aither-shell` commands. See [Aitherium/awsh](https://github.com/Aitherium/awsh).

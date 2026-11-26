@@ -28,7 +28,7 @@ Three cases, decided before anything runs, so you always know which one you are 
 
 | you type | what happens |
 |---|---|
-| `/models` | a **slash command** — dispatched locally, 74 of them |
+| `/models` | a **slash command** — dispatched locally, 133 of them |
 | `!git status` | a **shell escape** — straight through to your shell |
 | `why is this container unhealthy` | a **question** — answered by the backend you chose |
 
@@ -91,7 +91,7 @@ awsh --version
 
 ## The commands
 
-74 of them. `/commands` lists every one, `/help <name>` explains one, and Tab
+133 of them. `/help` lists every one, `/help <name>` explains one, and Tab
 completes them.
 
 | | |
@@ -103,7 +103,7 @@ completes them.
 | `/ops` `/backups` `/backup` | the platform control plane: `aither ops backups verify` is a dry run; `--apply` starts it, `--agent genesis` hands it to Genesis |
 | `/codegraph` `/repowise` `/explore` `/review` | the code you are standing in |
 | `/memory` `/context` `/ingest` `/research` | what it knows and what you gave it |
-| `/mail` `/inbox` `/cal` `/tasks` | the day around the work |
+| `/mail` `/inbox` `/cal` | the day around the work |
 | `/imagine` `/generate` `/notebook` | making things |
 | `/escalate` `/approve` `/expedition` | when a human has to decide |
 
@@ -122,7 +122,7 @@ completes them.
 >
 > **Planned, not built:** One umbrella installer package that installs every composed brick together under the `awharness` name. Nothing by that package name is published yet.
 >
-> The other 10 composed bricks: `awdk` `awskills` `awm` `awgraph` `awrun` `awrise` `awgit` `awpermit` `awrelay` `awnode`. All 99 bricks, in layers: https://aitherium.github.io/#map
+> The other 10 composed bricks: `awdk` `awskills` `awm` `awgraph` `awrun` `awrise` `awgit` `awpermit` `awrelay` `awnode`. All 102 bricks, in layers: https://aitherium.github.io/#map
 <!-- aither-harness:end -->
 
 `awsh` is the part you type into. What it adds to a terminal that only talks to

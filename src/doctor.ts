@@ -184,6 +184,17 @@ export async function runDoctor(p: DoctorProbes): Promise<DoctorReport> {
     try {
       const r = await p.getJson(`${harnessUrl}/health`);
       add('harness-health', r.status === 200, `${harnessUrl}/health -> ${r.status ?? 'no answer'}`, strict);
+      if (r.status === 200 && r.body && typeof r.body === 'object') {
+        const hb = r.body as Record<string, any>;
+        const cap = hb.swarm_capacity && typeof hb.swarm_capacity === 'object' ? hb.swarm_capacity : null;
+        const hs: string[] = Array.isArray(cap?.swarm_harnesses)
+          ? cap.swarm_harnesses
+          : Array.isArray(hb.harnesses_installed) ? hb.harnesses_installed : [];
+        const ui = cap?.ui_url || p.env.AITHER_SWARM_UI_URL || 'https://app.aitherium.com/swarm';
+        const ep = cap?.swarms_endpoint || '/swarms';
+        add('swarm-capacity', hs.length > 0,
+          `${hs.length} local harness(es) [${hs.join(', ') || 'none'}] · ${harnessUrl}${ep} · UI ${ui}`, false);
+      }
     } catch (err: any) {
       add('harness-health', null, `probe crashed: ${err?.message || err}`, strict);
     }
